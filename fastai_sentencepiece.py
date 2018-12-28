@@ -79,13 +79,16 @@ class SentencepieceWikiModel:
                 
             
     def getUserdefinedSymbols(self): 
-        return [text.transform.BOS,
+        return defaults.text_spec_tok
+        """
+                [text.transform.BOS,
                 text.transform.PAD,
                 text.transform.TK_MAJ,
                 text.transform.TK_UP,
                 text.transform.TK_REP,
                 text.transform.TK_WREP,
                 text.transform.FLD ] 
+        """
 
     def trainVocabulary(self): 
         if self.pathVocab.exists():
@@ -106,11 +109,16 @@ class SentencepieceWikiModel:
     
         pathSrc_list = [str(s) for s in self.pathTxt.glob("**/*.txt")]
         pathSrc_list= ",".join(pathSrc_list)
-    
+        #we enble all control symbols so that the tokenizations cleans the input text
+        #but we also create them as userdefined symbols in order to allocate and id for each
+        #f"--bos_id=-1 " \
+        #f"--eos_id=-1 " \
+        #f"--pad_id=-1 " \
         sp_params = f"--input={pathSrc_list} "  \
-                    f"--bos_id=-1 " \
-                    f"--eos_id=-1 " \
-                    f"--pad_id=-1 " \
+                    f"--unk_piece={UNK} " \
+                    f"--bos_piece={BOS} " \
+                    f"--eos_piece=xxeos " \
+                    f"--pas_piece={PAD} " \
                     f"--user_defined_symbols={str_specialcases} " \
                     f"--character_coverage=1.0 " \
                     f"--max_sentence_length=4096 " \
