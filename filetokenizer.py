@@ -39,7 +39,7 @@ class FileTokenizer():
         
         pathIds = self.tokPath/(inPath.stem+"-ids.npy")
         pathIds.parent.mkdir(parents=True,exist_ok=True)
-        dtype =  np.int16 if len(vocab.itos) < 2^15/2-1 else np.int32  #should test whether we can use uint16
+        dtype =  np.int16 if len(vocab.itos) < pow(2,15)-1 else np.int32  #should test whether we can use uint16
         arrays = []
         with inPath.open("r") as f:
             for line in f:

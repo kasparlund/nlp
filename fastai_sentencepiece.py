@@ -7,12 +7,12 @@ import shutil
 import sentencepiece as spm
 
 def rm_extra_lineshift(t:str) -> str:
-    return re.sub('[\r\n]+.?', '\n', t)
+    return re.sub('[\r\n]+', '\n', t)
 
 class SentencepieceWikiModel:
-    def __init__(self, lang:str, pathJson:Path, pathcsv:Path, pathTxt:Path, pathVocab:Path,
+    def __init__(self, lang:str, pathJson:Path, pathcsv:Path, pathTxt:Path, pathVocab:Path, minWords, 
                  vocab_size:int=32000, model_type:str='unigram', 
-                 rules=text.transform.defaults.text_pre_rules ):  #should include removal of repetitions
+                 rules=text.transform.defaults.text_pre_rules, chunksize=500000 ):  #should include removal of repetitions
         self.lang           = lang
         self.pathJson       = pathJson
         self.pathVocab      = pathVocab
@@ -22,45 +22,46 @@ class SentencepieceWikiModel:
         self.model_type     = model_type
         self.rules          = rules
         self.rules.append(rm_extra_lineshift)
-
-        
-        self.pathVocab.mkdir(parents=True, exist_ok=True)
+        self.minWords       = minWords
+        self.chunksize      = chunksize
 
     def wikijson2TrainingData(self):
+        #Generate text files for training af sentencepiece vocabulary and a csv-file for training a languagemodel with the vocabulary"
         
         def save_sections( data, f_out, fileCount ):
+            if not self.pathTxt.exists(): self.pathTxt.mkdir(parents=True, exist_ok=True)
             p = self.pathTxt / f"{fileCount}.txt"
-            with p.open("w+") as fw:
+            with p.open("w+", encoding="utf-8") as fw:
                 fw.write( "\n".join(data["text"]) )
-            data.to_csv(f_out, index=False, header=False, mode='a')
+            data.to_csv(f_out, index=False, header=False, mode='a', encoding='utf-8')
         
-        "Generate text files for training af sentencepiece vocabulary " \
-        "and a csv-file for training a languagemodel with the vocabulary"
-        self.pathTxt.mkdir(parents=True, exist_ok=True)
-        
-        pathParts = len(pathJson.parts)        
-        with self.pathcsv.open("w") as f_out:
+        pathParts = len(self.pathJson.parts)        
+
+        if not self.pathcsv.parent.exists(): self.pathcsv.parent.mkdir(parents=True, exist_ok=True)
+        with self.pathcsv.open("w", encoding='utf-8') as f_out:
             fileCount = 0
             fields    = ['text', 'wordcount']
             data      = pd.DataFrame(columns=fields)
-            data.to_csv(f_out, index=False, mode='a')
+            data.to_csv(f_out, index=False, mode='a', )
             
             sections = []
             for fn in self.pathJson.glob("**/wiki*"):
+                nbWords=0
                 with open(fn, encoding='utf-8') as f:
                     for line in f:
                         section = json.loads(line)
                         
-                        if section['text'].find(section['title']) >=0 :
-                            section['text'] = section['text'][len(section['title'])+2:]
+                        if section['text'].find(section['title']) >=0 : section['text'] = section['text'][:len(section['title']):]
                 
                         section['text']      = reduce(lambda t, rule: rule(t), self.rules, section['text'])
                         section['wordcount'] = len(re.findall(r'\w+',section['text']))
-            
-                        if section["wordcount"] > minWords:
+
+                        if section["wordcount"] > self.minWords:
                             sections.append({k:section[k] for k in fields})
+                            nbWords += section["wordcount"]
                 
-                if len(sections) > chunksize: 
+                #if len(sections) > self.chunksize: 
+                if nbWords > self.chunksize: 
                     data = pd.DataFrame(sections)
                     sections = []
                     
@@ -87,6 +88,8 @@ class SentencepieceWikiModel:
                 text.transform.FLD ] 
 
     def trainVocabulary(self): 
+        if self.pathVocab.exists():
+            self.pathVocab.mkdir(parents=True, exist_ok=True)
         model_prefix = self.pathVocab / "m"
     
         #Set the following controls to sentencepiece values until there is a release where we can set the token value
@@ -99,10 +102,10 @@ class SentencepieceWikiModel:
         #it is the responsibility of fastai to generate and use the control tokens them and apply them before decoding
         #Fx applying TK_MAJ after tokenization would change She to two token TK_MAJ+she.
         #Problem! Sentencepiece would tokenize "Elle" as _Elle so our deal_caps would not catch it
-        str_specialcases = ",".join(getUserdefinedSymbols()) 
+        str_specialcases = ",".join(self.getUserdefinedSymbols()) 
     
         pathSrc_list = [str(s) for s in self.pathTxt.glob("**/*.txt")]
-        pathSrc_list= ",".join(getUserdefinedSymbols)
+        pathSrc_list= ",".join(pathSrc_list)
     
         sp_params = f"--input={pathSrc_list} "  \
                     f"--bos_id=-1 " \
@@ -110,6 +113,9 @@ class SentencepieceWikiModel:
                     f"--pad_id=-1 " \
                     f"--user_defined_symbols={str_specialcases} " \
                     f"--character_coverage=1.0 " \
+                    f"--max_sentence_length=4096 " \
+                    f"--input_sentence_size={int(1e7)} " \
+                    f"--shuffle_input_sentence=true " \
                     f"--model_prefix={model_prefix} " \
                     f"--vocab_size={self.vocab_size} " \
                     f"--model_type={self.model_type} " 
