@@ -83,25 +83,25 @@ class MyLanguageModelLoader():
         #in the batch and batch by batch
         
         j, ibuf = self.ei, 0
+        ei,eo   = self.ei, self.eo  #local variables are twice as fast in a loop
         #bi, bo  = self.ei, self.eo  #only used in the print statement below
         while nToks > ibuf:   
             rag = self.dataset.x.items[self.idx[j]]
-            r0  = self.eo if j==self.ei else 0         
+            r0  = eo if j==ei else 0         
             r1  = len(rag)
             rl  = r1 - r0
-
             #if rl<self.minToks and self.eo > 0: #could improve convergence
             #    j += 1
-            #    continue    
-
+            #    continue
             if ibuf+rl >= nToks:
-                self.eo = (nToks + self.eo) if j==self.ei else (nToks-ibuf) 
-                self.ei = j
-                r1      = self.eo
-                rl      = r1 - r0
+                eo = (nToks + eo) if j==ei else (nToks-ibuf) 
+                ei = j
+                r1 = eo
+                rl = r1 - r0
             self.buffer[ibuf:ibuf+rl] = rag[r0:r1]
             ibuf += rl
             j    += 1      
+        self.ei, self.eo = ei, eo 
         #if self.ei==bi: print( f"one rag:{self.ei==bi} nToks:{nToks} nBToks:{ibuf} bi:{bi} bo:{bo} ei:{self.ei} eo:{self.eo}" )        
 
     def __len__(self) -> int: return self.ite_len
