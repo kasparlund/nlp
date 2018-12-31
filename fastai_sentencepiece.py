@@ -8,11 +8,13 @@ import sentencepiece as spm
 
 def rm_extra_lineshift(t:str) -> str:
     return re.sub('[\r\n]+', '\n', t)
-
+def extract_link_title(t:str) -> str:
+    return re.sub('\[\[(?:[^\]\[:]+\|)|([^\]\[:]+)\]\]', '\g<1>', t).replace('[','')
+#def remove_first_empty_lines(t:str) -> str:  return re.sub('^\n', '', t)
 class SentencepieceWikiModel:
     def __init__(self, lang:str, pathJson:Path, pathcsv:Path, pathTxt:Path, pathVocab:Path, minWords, 
                  vocab_size:int=32000, model_type:str='unigram', 
-                 rules=text.transform.defaults.text_pre_rules, chunksize=500000 ):  #should include removal of repetitions
+                 rules=text.transform.defaults.text_pre_rules, chunksize=int(4e7) ):  #should include removal of repetitions
         self.lang           = lang
         self.pathJson       = pathJson
         self.pathVocab      = pathVocab
@@ -22,6 +24,7 @@ class SentencepieceWikiModel:
         self.model_type     = model_type
         self.rules          = rules
         self.rules.append(rm_extra_lineshift)
+        #self.rules.append(extract_link_title)
         self.minWords       = minWords
         self.chunksize      = chunksize
 
@@ -45,13 +48,14 @@ class SentencepieceWikiModel:
             data.to_csv(f_out, index=False, mode='a', )
             
             sections = []
+            nbWords  = 0
             for fn in self.pathJson.glob("**/wiki*"):
-                nbWords=0
                 with open(fn, encoding='utf-8') as f:
                     for line in f:
                         section = json.loads(line)
                         
-                        if section['text'].find(section['title']) >=0 : section['text'] = section['text'][:len(section['title']):]
+                        #if section['text'].find(section['title']) >=0 : section['text'] = remove_first_empty_lines(section['text'][len(section['title']):])
+                        if section['text'].find(section['title']) >=0 : section['text'] = section['text'][len(section['title']):]
                 
                         section['text']      = reduce(lambda t, rule: rule(t), self.rules, section['text'])
                         section['wordcount'] = len(re.findall(r'\w+',section['text']))
@@ -60,14 +64,14 @@ class SentencepieceWikiModel:
                             sections.append({k:section[k] for k in fields})
                             nbWords += section["wordcount"]
                 
-                #if len(sections) > self.chunksize: 
-                if nbWords > self.chunksize: 
-                    data = pd.DataFrame(sections)
-                    sections = []
-                    
-                    save_sections(data, f_out, fileCount)
-                    fileCount += 1
-                    data = None
+                        #if len(sections) > self.chunksize: 
+                        if nbWords > self.chunksize: 
+                            data = pd.DataFrame(sections)
+                            sections = []
+                            nbWords = 0
+                            save_sections(data, f_out, fileCount)
+                            fileCount += 1
+                            data = None
                     
             if len(sections) > 0: 
                 data = pd.DataFrame(sections)
@@ -79,27 +83,17 @@ class SentencepieceWikiModel:
                 
             
     def getUserdefinedSymbols(self): 
-        return defaults.text_spec_tok
-        """
-                [text.transform.BOS,
-                text.transform.PAD,
+        return  [text.transform.FLD, 
                 text.transform.TK_MAJ,
                 text.transform.TK_UP,
                 text.transform.TK_REP,
-                text.transform.TK_WREP,
-                text.transform.FLD ] 
-        """
+                text.transform.TK_WREP]
 
-    def trainVocabulary(self): 
-        if self.pathVocab.exists():
-            self.pathVocab.mkdir(parents=True, exist_ok=True)
+    def createParameters(self): 
         model_prefix = self.pathVocab / "m"
     
         #Set the following controls to sentencepiece values until there is a release where we can set the token value
         #Note taku910 has already made the change but the pip of sentencepiewce version has not been updated 
-        text.transform.UNK = "<unk>"
-        #text.transform.BOS = "<s>"
-        #text.transform.PAD = "<pad>"
     
         #create control ids for the rest of the fastai control tokens in case the user needs them
         #it is the responsibility of fastai to generate and use the control tokens them and apply them before decoding
@@ -111,33 +105,37 @@ class SentencepieceWikiModel:
         pathSrc_list= ",".join(pathSrc_list)
         #we enble all control symbols so that the tokenizations cleans the input text
         #but we also create them as userdefined symbols in order to allocate and id for each
-        #f"--bos_id=-1 " \
-        #f"--eos_id=-1 " \
-        #f"--pad_id=-1 " \
         sp_params = f"--input={pathSrc_list} "  \
-                    f"--unk_piece={UNK} " \
-                    f"--bos_piece={BOS} " \
+                    f"--num_threads={defaults.cpus} " \
+                    f"--unk_piece={text.transform.UNK} " \
+                    f"--bos_piece={text.transform.BOS} " \
                     f"--eos_piece=xxeos " \
-                    f"--pas_piece={PAD} " \
+                    f"--pad_piece={text.transform.PAD} " \
                     f"--user_defined_symbols={str_specialcases} " \
                     f"--character_coverage=1.0 " \
-                    f"--max_sentence_length=4096 " \
-                    f"--input_sentence_size={int(1e7)} " \
+                    f"--max_sentence_length=1024 " \
+                    f"--input_sentence_size={int(1e6)} " \
                     f"--shuffle_input_sentence=true " \
                     f"--model_prefix={model_prefix} " \
                     f"--vocab_size={self.vocab_size} " \
                     f"--model_type={self.model_type} " 
     
-        #f"--split_by_number=1 " \
         #hard_vocab_limit=False
-        #use_all_vocab
-        #print(sp_params)
+        return sp_params, model_prefix
+
+    def trainVocabulary(self) : 
+        sp_params, model_prefix = self.createParameters()
+        print(f"running spm.SentencePieceTrainer.Train(sp_params) with sp_params:\n{sp_params}")
+        if self.pathVocab.exists(): self.pathVocab.mkdir(parents=True, exist_ok=True)
+        if not model_prefix.parent.exists(): model_prefix.parent.mkdir(parents=True, exist_ok=True)
         spm.SentencePieceTrainer.Train(sp_params)
-        
-        #convert sentencepieces vocabulary to a format fastai can read
-        with open( self.pathVocab/"m.vocab", 'r') as f:
+        print("finised training semntencepiece")
+
+    def convertVocab(self):   
+        "convert sentencepieces vocabulary to a format fastai can read"
+        with (self.pathVocab/"m.vocab").open('r', encoding='utf-8') as f:
             vocab = [line.split('\t')[0] for line in f.readlines()]
-        with open( self.pathVocab / "itos.pkl", "wb") as f:    
+        with (self.pathVocab / "itos.pkl").open( "wb") as f:    
             pickle.dump(vocab, f)
 
 
@@ -158,7 +156,7 @@ class SentencepieceTokenizer(BaseTokenizer):
         return self.tok.EncodeAsPieces(t)
     
     def add_special_cases(self, toks:Collection[str]):
-        #this should have been done when training sentencepiece
+        #this is not necessay with sentencepiece unigram model 
         pass
     
     def vocab(self): return self.vocab_

@@ -6,11 +6,11 @@ class MyLanguageModelLoader():
     "Create a dataloader with bptt slightly changing."
     
     class CircularIndex():
+        #When the index exceeds the length of self.idx then it is wrap to start at the head 
+        #or the end if the aray is configured to move backwards
         def __init__(self, length:int, forward:bool): 
             self.idx      = np.arange(length)
             self.forward_ = forward
-        #when the index exceeds the length of self.idx then it is wrap to start at the head 
-        #or the end if the aray is configured to move backwards
         def __getitem__(self, i): 
             index = i%len(self.idx) if self.forward_ else len(self.idx)-1-i%len(self.idx)
             return self.idx[index]
@@ -20,7 +20,7 @@ class MyLanguageModelLoader():
                 
     def __init__(self, dataset:LabelList, bs:int=64, bptt:int=70, backwards:bool=False, shuffle:bool=False,
                  max_len:int=25, p_bptt:int=0.95):
-        self.init_kwargs = dict(bs=bs, bptt=bptt, backwards=backwards, shuffle=shuffle, max_seq=max_len)
+        self.init_kwargs = dict(bs=bs, bptt=bptt, backwards=backwards, shuffle=shuffle, max_len=max_len)
         self.dataset,self.bs,self.bptt,self.backwards,self.shuffle,self.p_bptt = dataset,bs,bptt,backwards,shuffle,p_bptt
         
         nToks = 0
@@ -67,7 +67,7 @@ class MyLanguageModelLoader():
             nToks   = self.bs*(seq_len+1)
 
             self.fill_buffer(nToks)
-            data  = torch.from_numpy( self.buffer[:nToks].reshape(self.bs,-1) )
+            data  = torch.as_tensor( self.buffer[:nToks].reshape(self.bs,-1), dtype=torch.long )
             res   = data[:,0:seq_len-1], data[:,1:seq_len]        
             i    += 1
             #if i==self.ite_len : print(res) # check that y is shift to predict x       
