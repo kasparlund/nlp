@@ -13,7 +13,7 @@ class FileTokenizer():
     def __init__(self, tokPath:Path, tok_func:Callable, lang:str, vocab:fastai.text.transform.Vocab, 
                  special_cases:Collection[str]=None, n_cpus:int=None, minToks:int=5):
         self.tok_func,self.lang,self.special_cases = tok_func,lang,special_cases
-        self.pre_rules  = text.transform.defaults.text_pre_rules
+        self.pre_rules  = text.transform.defaults.text_pre_rules.copy()
         self.pre_rules.append(rm_extra_lineshift)
         self.post_rules = text.transform.defaults.text_post_rules
         self.special_cases = special_cases if special_cases else defaults.text_spec_tok
@@ -23,6 +23,8 @@ class FileTokenizer():
         self.tokPath = tokPath
         
         self.count=0
+        self.dtype =  np.int16 if len(self.vocab.itos) < pow(2,15)-1 else np.int32  #should test whether we can use uint16
+        print(f"self.dtype:{self.dtype}")
 
     def __repr__(self) -> str:
         res = f'Tokenizer {self.tok_func.__name__} in {self.lang} with the following rules:\n'
@@ -36,12 +38,13 @@ class FileTokenizer():
         if not inPath.exists(): 
             print(f"file does not exist{str(inPath)}")
             return ""
-        
+        else: 
+            print(f"processing file:{inPath}")
+
         pathIds = self.tokPath/(inPath.stem+"-ids.npy")
         pathIds.parent.mkdir(parents=True,exist_ok=True)
-        dtype =  np.int16 if len(vocab.itos) < pow(2,15)-1 else np.int32  #should test whether we can use uint16
         arrays = []
-        with inPath.open("r") as f:
+        with inPath.open("r", encoding='utf-8') as f:
             for line in f:
                 for rule in self.pre_rules: line = rule(line)
                 toks = tok.tokenizer(line)
@@ -49,7 +52,7 @@ class FileTokenizer():
                 ids = self.vocab.numericalize(toks) 
                 
                 if len(toks) < self.minToks: continue
-                arrays.append( np.asarray(ids, dtype=dtype) )
+                arrays.append( np.asarray(ids, dtype=self.dtype) )
         
         if len(arrays)>0:
             with pathIds.open("wb") as f:
@@ -65,6 +68,7 @@ class FileTokenizer():
 
     def process_all(self, texts:Collection[str]) -> List[List[str]]:
         "Process a list of `texts`."
+        print(f"process_all n_cpus:{self.n_cpus}")
         if self.n_cpus <= 1: return self._process_all_1(texts)
         with ProcessPoolExecutor(self.n_cpus) as e:
             return sum(e.map(self._process_all_1, partition_by_cores(texts, self.n_cpus)), [])
@@ -84,7 +88,7 @@ class FileTokenizer():
         files = list(self.tokPath.glob("*-ids.npy"))
         
         #3use_cores = max(1,defaults.cpus)
-        print(f"threading with on {n_cpus} cores")
+        #print(f"threading with on {n_cpus} cores")
         
         idArrays = self.getIds_from_file(files)
         #pool = ThreadPool(n_cpus) 
@@ -104,8 +108,4 @@ class FileTokenizeProcessor(PreProcessor):
 
     def process_one(self, item):  return self.tokenizer._process_all_1([item])[0]
     def process(self, ds):
-        print("FileTokenizeProcessor process")
-        #ds.items = _join_texts(ds.items, self.mark_fields)
         self.tokenizer.process_all(ds.items)
-        #ds.items = self.tokenizer.process_all(ds.items)
-        #ds.items = tokens
