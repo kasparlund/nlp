@@ -15,14 +15,14 @@ class MyLanguageModelLoader():
             self.idx      = np.arange(length)
             self.forward_ = forward
         def __getitem__(self, i): 
-            index = i%len(self.idx) if self.forward_ else len(self.idx)-1-i%len(self.idx)
-            return self.idx[index]
+            idx = self.idx
+            return idx[ i%len(idx) if self.forward_ else len(idx)-1-i%len(idx) ]
         def __len__(self) -> int: return len(self.idx)
         def shuffle(self): np.random.shuffle(self.idx)
         def forward(self, forward:bool=True): self.forward_ = forward
                 
     def __init__(self, dataset:LabelList, bs:int=64, bptt:int=70, backwards:bool=False, shuffle:bool=False,
-                 max_len:int=25, p_bptt:int=0.95, bl:BatchLayout=BatchLayout.Sequential):
+                 max_len:int=25, p_bptt:int=0.95, bl:BatchLayout=BatchLayout.Parallel):
         self.init_kwargs = dict(bs=bs, bptt=bptt, backwards=backwards, shuffle=shuffle, max_len=max_len)
         self.dataset,self.bs,self.bptt,self.backwards,self.shuffle,self.p_bptt = dataset,bs,bptt,backwards,shuffle,p_bptt
         
@@ -54,7 +54,9 @@ class MyLanguageModelLoader():
         max_batch_element = self.bs * (1 + math.ceil( self.bptt*(1+0.5*self.p_bptt) ) )
         self.buffer       = np.zeros(max_batch_element, dtype=np.long)
         
-        if self.bl is BatchLayout.Parallel:self.ri = np.zeros((bs,2), dtype=np.int) #with col1=current rag and col2=index into the current rag
+        if self.bl is BatchLayout.Parallel:
+            self.ei = np.zeros(self.bs, dtype=np.int)
+            self.eo = np.zeros(self.bs, dtype=np.int)
         print(f"LanguageModelLoader.allocate_buffers Used GB memory:{usedGB_RAM()} "+\
               f"shuffle:{self.shuffle} backwards:{self.backwards}" )  
         
@@ -67,30 +69,136 @@ class MyLanguageModelLoader():
         if self.shuffle: self.idx.shuffle()
 
         if self.bl is BatchLayout.Parallel:
-            step         = len(self.idx)//bs #step is trucated => batches may overlap a bit
-            self.ri[:,0] = np.arange(self.bs)*step
-            self.ri[:,1] = 0
+            self.eo *= 0 
+            step     = len(self.idx)//self.bs #step is truncated => batches may overlap a bit
+            for i in range(self.bs): self.ei[i] = i*step
         else:
             self.ei,self.eo = 0,0
 
         i = 0
         while i < self.ite_len:
+            self.i=i  
             seq_len = int(self.bptt*(1. + self.p_bptt*(np.random.random() - 0.5)))
+            nToks   = self.bs*(seq_len+1)
+
             if self.bl is BatchLayout.Parallel:
-                self.parallel_fill_buffer(seq_len+1)
-                data = self.buffer.reshape(self.bs,-1)
-            else:    
-                nToks   = self.bs*(seq_len+1)
-                self.fill_buffer(nToks)
                 data = self.buffer[:nToks].reshape(self.bs,-1)
+                self.parallel_fill_buffer(data, self.ei,self.eo)
+                #for j in range(len(data)): self.ei[j],self.eo[j] = self.fill_row(data[j],self.ei[j],self.eo[j])
+            else:    
+                data = self.buffer[:nToks]
+                self.ei, self.eo  = self.fill_row(data,self.ei, self.eo)
+                data = data.reshape(self.bs,-1)
 
             data  = torch.as_tensor( data, dtype=torch.long )
             res   = data[:,0:seq_len-1], data[:,1:seq_len]        
             i    += 1
             #if i==self.ite_len : print(res) # check that y is shift to predict x       
             yield res        
-    
-    def fill_buffer(self, nToks:int):
+
+
+    def fill_row(self, row, ei,eo):
+        "new the tokens in the buffer with nToks from the ragged array"
+        #nToks: number of tokens to be extract and inserted starting at the beginning of the buffer from the 
+        #       last saved indices in the ragged array and forward - possibly wrapping to the head of the dataset
+        #ei: index of the last rag to be extract
+        #eo: index (not inclusive) where the extract stops in the last rag
+        #ei and eo starts at 0,0 in the beginning of a batch and is then updated as we fill in the buffer 
+        #in the batch and batch by batch
+        
+        #ei,eo = ragidx[0],ragidx[1]
+        ibuf, j, nToks = 0, ei, row.size
+        items = self.dataset.x.items
+        while nToks > ibuf:   
+            i   = self.idx[j]
+            rag = items[i]
+            r0  = eo if j==ei else 0         
+            r1  = len(rag)
+            rl  = r1 - r0
+            if ibuf+rl >= nToks:
+                eo = (nToks + eo) if j==ei else (nToks-ibuf) 
+                ei = j
+                r1 = eo
+                rl = r1 - r0
+            row[ibuf:ibuf+rl] = rag[r0:r1]
+            ibuf += rl
+            j    += 1 
+        #ragidx[0]=ei
+        #ragidx[1]=eo    
+        #return ragidx
+        #if self.ei==bi: print( f"one rag:{self.ei==bi} nToks:{nToks} nBToks:{ibuf} bi:{bi} bo:{bo} ei:{self.ei} eo:{self.eo}" 
+        return ei,eo    
+
+    def parallel_fill_buffer(self, data, ei, eo):
+        for j in range(len(data)):
+            ei[j],eo[j] = self.fill_row(data[j],ei[j],eo[j])
+
+    """
+    def fill_row(self, row, ragidx):
+        "new the tokens in the buffer with nToks from the ragged array"
+        #nToks: number of tokens to be extract and inserted starting at the beginning of the buffer from the 
+        #       last saved indices in the ragged array and forward - possibly wrapping to the head of the dataset
+        #ei: index of the last rag to be extract
+        #eo: index (not inclusive) where the extract stops in the last rag
+        #ei and eo starts at 0,0 in the beginning of a batch and is then updated as we fill in the buffer 
+        #in the batch and batch by batch
+        
+        ei,eo = ragidx[0],ragidx[1]
+        ibuf, j, nToks = 0, ei, row.size
+        items = self.dataset.x.items
+        while nToks > ibuf:   
+            i   = self.idx[j]
+            rag = items[i]
+            r0  = eo if j==ei else 0         
+            r1  = len(rag)
+            rl  = r1 - r0
+            if ibuf+rl >= nToks:
+                eo = (nToks + eo) if j==ei else (nToks-ibuf) 
+                ei = j
+                r1 = eo
+                rl = r1 - r0
+            row[ibuf:ibuf+rl] = rag[r0:r1]
+            ibuf += rl
+            j    += 1 
+        ragidx[0]=ei
+        ragidx[1]=eo    
+        #return ragidx
+        #if self.ei==bi: print( f"one rag:{self.ei==bi} nToks:{nToks} nBToks:{ibuf} bi:{bi} bo:{bo} ei:{self.ei} eo:{self.eo}" 
+
+    def parallel_fill_buffer(self,  seq_len:int):
+        "new the tokens in the buffer with nToks from the ragged array"
+        #nToks: number of tokens to be extract and inserted starting at the beginning of the buffer from the 
+        #       last saved indices in the ragged array and forward - possibly wrapping to the head of the dataset
+        #ei: index of the last rag to be extract
+        #eo: index (not inclusive) where the extract stops in the last rag
+        #ei and eo starts at 0,0 in the beginning of a batch and is then updated as we fill in the buffer 
+        #in the batch and batch by batch
+        
+        j, ibuf = self.ragidx[:,0], self.ragidx[:,0]*0
+        ei,eo   = self.ragidx[:,0], self.ragidx[:,1]
+        bv      = self.buffer.reshape(len(self.ragidx),-1)
+        fill    = (seq_len <= ibuf)
+        #bi, bo = np.copy(ei), np.copy(eo)  #only used in the print statement below
+        while fill.any():   
+            rags = np.asarray( self.dataset.x.items[self.idx[j]] )
+            r0   = np.where(j==ei, eo, 0)
+            r1   = np.asarray( [len(r) for r in rags] )
+            rl   = r1 - r0
+            last = ibuf+rl >= seq_len
+            if last.any():
+                eo[last] = np.where( j==ei, (seq_len + eo), (seq_len-ibuf) )[last]
+                ei[last] = j[last]
+                r1[last] = eo[last]
+                rl[last] = (r1 - r0)[last]
+            bv[fill, ibuf[fill]:ibuf[fill]+rl[fill]] = rags[fill,r0[fill]:r1[fill]]
+            ibuf[fill] += rl[fill]
+            j[fill]    += 1      
+            fill        = (seq_len <= ibuf)
+
+        self.ragidx[:,0] = ei
+        self.ragidx[:,1] = eo
+        #if self.ei==bi: print( f"one rag:{self.ei==bi} seq_len:{seq_len} ibuf:{ibuf} bi:{bi} bo:{bo} ei:{self.ei} eo:{self.eo}" )        
+    def fill_buffer_original(self, nToks:int):
         "new the tokens in the buffer with nToks from the ragged array"
         #nToks: number of tokens to be extract and inserted starting at the beginning of the buffer from the 
         #       last saved indices in the ragged array and forward - possibly wrapping to the head of the dataset
@@ -117,41 +225,8 @@ class MyLanguageModelLoader():
             ibuf += rl
             j    += 1      
         self.ei, self.eo = ei, eo 
-        #if self.ei==bi: print( f"one rag:{self.ei==bi} nToks:{nToks} nBToks:{ibuf} bi:{bi} bo:{bo} ei:{self.ei} eo:{self.eo}" )        
-
-    def parallel_fill_buffer(self,  seq_len:int):
-        "new the tokens in the buffer with nToks from the ragged array"
-        #nToks: number of tokens to be extract and inserted starting at the beginning of the buffer from the 
-        #       last saved indices in the ragged array and forward - possibly wrapping to the head of the dataset
-        #ei: index of the last rag to be extract
-        #eo: index (not inclusive) where the extract stops in the last rag
-        #ei and eo starts at 0,0 in the beginning of a batch and is then updated as we fill in the buffer 
-        #in the batch and batch by batch
-        
-        j, ibuf = self.ri[:,0], self.ri[:,0]*0
-        ei,eo   = self.ri[:,0], self.ri[:,1]
-        bv      = self.buffer.reshape(len(self.ri),-1)
-        fill    = (seq_len <= ibuf)
-        #bi, bo = np.copy(ei), np.copy(eo)  #only used in the print statement below
-        while fill.any():   
-            rags = np.asarray( self.dataset.x.items[self.idx[j]] )
-            r0   = np.where(j==ei, eo, 0)
-            r1   = np.asarray( [len(r) for r in rags] )
-            rl   = r1 - r0
-            last = ibuf+rl >= seq_len
-            if last.any():
-                eo[last] = np.where( j==ei, (seq_len + eo), (seq_len-ibuf) )[last]
-                ei[last] = j[last]
-                r1[last] = eo[last]
-                rl[last] = (r1 - r0)[last]
-            bv[fill, ibuf[fill]:ibuf[fill]+rl[fill]] = rags[fill,r0[fill]:r1[fill]]
-            ibuf[fill] += rl[fill]
-            j[fill]    += 1      
-            fill        = (seq_len <= ibuf)
-
-        self.ri[:,0] = ei
-        self.ri[:,1] = eo
-        #if self.ei==bi: print( f"one rag:{self.ei==bi} seq_len:{seq_len} ibuf:{ibuf} bi:{bi} bo:{bo} ei:{self.ei} eo:{self.eo}" )        
+        #if self.ei==bi: print( f"one rag:{self.ei==bi} nToks:{nToks} nBToks:{ibuf} bi:{bi} bo:{bo} ei:{self.ei} eo:{self.eo}" 
+    """
 
     def __len__(self) -> int: return self.ite_len
     def __getattr__(self,k:str)->Any: return getattr(self.dataset, k)
