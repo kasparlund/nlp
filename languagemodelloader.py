@@ -1,7 +1,4 @@
 from fastai.text import * 
-def usedGB_RAM(): 
-    import psutil
-    return round((psutil.virtual_memory().used + psutil.swap_memory().used)/1e9,2)
 class BatchLayout(IntEnum):
     Parallel   = 1
     Sequential = 2
@@ -55,10 +52,9 @@ class MyLanguageModelLoader():
         #self.min_seq,self.max_seq = 5,max_len #self.min_seq, self.max_seq is no longer used
         self.num_workers = 0
         self.bl = bl
-        print(f"1 bl:{self.bl} __init__ self.bl is BatchLayout.Parallel.{self.bl == BatchLayout.Parallel}")
 
         #self.minToks = 4 #argument used to discard end of sections that are too short to be used for prediction of the next word
-        print(f"LanguageModelLoader.__init__ Used GB memory:{usedGB_RAM()} batches:{len(self)} nToks:{nToks} "+\
+        print(f"LanguageModelLoader.__init__ batches:{len(self)} nToks:{nToks} "+\
               f"bptt:{self.bptt} p_bptt:{self.p_bptt} shuffle:{self.shuffle} backwards:{self.backwards}" )  
 
 
@@ -77,8 +73,7 @@ class MyLanguageModelLoader():
         if self.bl == BatchLayout.Parallel:
             self.ei = np.zeros(self.bs, dtype=np.int)
             self.eo = np.zeros(self.bs, dtype=np.int)
-        print(f"LanguageModelLoader.allocate_buffers Used GB memory:{usedGB_RAM()} "+\
-              f"shuffle:{self.shuffle} backwards:{self.backwards}" )  
+        print(f"LanguageModelLoader.allocate_buffers shuffle:{self.shuffle} backwards:{self.backwards}" )  
         
     def __iter__(self):
         if getattr(self.dataset, 'item', None) is not None: 
@@ -88,14 +83,14 @@ class MyLanguageModelLoader():
         if self.idx is None: self.allocate_buffers()
         if self.shuffle: self.idx.shuffle()
 
-        print(f"1 bl:{self.bl} __iter__ self.bl is BatchLayout.Parallel.{self.bl == BatchLayout.Parallel}")
         if self.bl == BatchLayout.Parallel:
-            print(f"2 bl:{self.bl} __iter__ self.bl is BatchLayout.Parallel.{self.bl == BatchLayout.Parallel}")
             self.eo *= 0 
             step     = len(self.idx)//self.bs #step is truncated => batches may overlap a bit
             for i in range(self.bs): self.ei[i] = i*step
-            print(f"self.ite_len:{self.ite_len} dataset.x.items:{len(self.dataset.x.items)}self.idx:{len(self.idx)} step:{step}")    
-            print(f"self.ei:\n{self.ei}")
+                
+            #print(f"self.ite_len:{self.ite_len} dataset.x.items:{len(self.dataset.x.items)}self.idx:{len(self.idx)} step:{step}")    
+            #print(f"self.ei:\n{self.ei}")
+            
             #track the iterations for print
             self.eit = np.zeros((self.bs,self.ite_len), dtype=np.int)
             self.eot = np.zeros((self.bs,self.ite_len), dtype=np.int)
@@ -111,13 +106,12 @@ class MyLanguageModelLoader():
             if self.bl == BatchLayout.Parallel:
                 data = self.buffer[:nToks].reshape(self.bs,-1)
                 self.parallel_fill_buffer(data, self.ei,self.eo)
-                #for j in range(len(data)): self.ei[j],self.eo[j] = self.fill_row(data[j],self.ei[j],self.eo[j])
-                self.eit[:,i] = self.ei[:]
-                self.eot[:,i] = self.eo[:]
-
+                
+                self.eit[:,i] = self.ei[:] #only for test
+                self.eot[:,i] = self.eo[:] #only for test
             else:    
                 data = self.buffer[:nToks]
-                self.ei, self.eo  = self.fill_row(data,self.ei, self.eo)
+                self.ei, self.eo = self.fill_row(data,self.ei, self.eo)
                 data = data.reshape(self.bs,-1)
 
             data  = torch.as_tensor( data, dtype=torch.long )
@@ -126,19 +120,15 @@ class MyLanguageModelLoader():
             #if i==self.ite_len : print(res) # check that y is shift to predict x       
             yield res  
 
-            MyLanguageModelLoader.testSaveIndexes(Path.cwd()/"test.csv",self.bs,self.eit,self.eot,self.idx,self.dataset.x.items)
+            #MyLanguageModelLoader.testSaveIndexes(Path.cwd()/"test.csv",self.bs,self.eit,self.eot,self.idx,self.dataset.x.items)
 
 
     def fill_row(self, row, ei,eo):
         "new the tokens in the buffer with nToks from the ragged array"
-        #nToks: number of tokens to be extract and inserted starting at the beginning of the buffer from the 
-        #       last saved indices in the ragged array and forward - possibly wrapping to the head of the dataset
-        #ei: index of the last rag to be extract
-        #eo: index (not inclusive) where the extract stops in the last rag
-        #ei and eo starts at 0,0 in the beginning of a batch and is then updated as we fill in the buffer 
-        #in the batch and batch by batch
+        #nToks: number of tokens to be extract to row
+        #ei: index of the first rag to be extract. Returned as index to the next rag to be extracted
+        #eo: index to the first token to be extracted in the first rag. Returned pointing to the next token to be extract in the last rag
         
-        #ei,eo = ragidx[0],ragidx[1]
         ibuf, j, nToks = 0, ei, row.size
         items = self.dataset.x.items
         while nToks > ibuf:   
@@ -159,6 +149,7 @@ class MyLanguageModelLoader():
         return ei,eo    
 
     def parallel_fill_buffer(self, data, ei, eo):
+        "data, ei, eo are passed by ref so updating then here updates the arrays in caller"
         for j in range(len(data)):
             ei[j],eo[j] = self.fill_row(data[j],ei[j],eo[j])
 
