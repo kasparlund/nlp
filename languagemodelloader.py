@@ -1,7 +1,9 @@
 from fastai.text import * 
+
 class BatchLayout(IntEnum):
     Parallel   = 1
     Sequential = 2
+    
 class MyLanguageModelLoader():
     "Create a dataloader with bptt slightly changing."
     
@@ -18,45 +20,25 @@ class MyLanguageModelLoader():
         def shuffle(self): np.random.shuffle(self.idx)
         def forward(self, forward:bool=True): self.forward_ = forward
 
-    @staticmethod
-    def testSaveIndexes(filepath,bs,eit,eot,idx,items):
-        "save the index so that we can inspect them afterwards"
-        print(eit)
-        lengths = np.zeros_like(eit, dtype=np.int)
-        for i in range(eit.shape[1]):
-            for k in range(bs): 
-                iidx = idx[eit[k,i]]
-                lengths[k,i] = len(items[iidx])
-
-        columns =       [f"length_bs{i}" for i in range(bs)]
-        columns.extend( [f"ei_bs{i}"     for i in range(bs)])
-        columns.extend( [f"eo_bs{i}"     for i in range(bs)])
-        columns = np.asarray(columns)             
-        data=np.concatenate([lengths,eit,eot],axis=0).T
-        pf = pd.DataFrame(data=data,columns=columns)
-        pf.to_csv(filepath,index=False)
-        print(pf)
-                
     def __init__(self, dataset:LabelList, bs:int=64, bptt:int=70, backwards:bool=False, shuffle:bool=False,
                  max_len:int=25, p_bptt:int=0.95, bl:BatchLayout=BatchLayout.Parallel):
         self.init_kwargs = dict(bs=bs, bptt=bptt, backwards=backwards, shuffle=shuffle, max_len=max_len)
         self.dataset,self.bs,self.bptt,self.backwards,self.shuffle,self.p_bptt = dataset,bs,bptt,backwards,shuffle,p_bptt
         
+        self.first = True
         nToks = 0
-        for s in dataset.x.items: nToks+=len(s)
-        self.ite_len = math.ceil( nToks / (self.bs*self.bptt) ) #this is returned in def __len__(self) 
-
-        self.idx = None
-        self.buffer = None
-
-        #self.min_seq,self.max_seq = 5,max_len #self.min_seq, self.max_seq is no longer used
+        for i,s in enumerate(dataset.x.items): nToks += len(s)
+        self.totalToks = nToks    
+        self.ite_len   = math.ceil( nToks / (self.bs*self.bptt) ) #this is returned in def __len__(self) 
+        self.idx       = None
+        self.buffer    = None
         self.num_workers = 0
         self.bl = bl
 
-        #self.minToks = 4 #argument used to discard end of sections that are too short to be used for prediction of the next word
-        print(f"LanguageModelLoader.__init__ batches:{len(self)} nToks:{nToks} "+\
+        print(f"LanguageModelLoader.__init__ iterations:{len(self)} rags:{len(self.dataset.x.items)} nToks:{nToks} "+\
               f"bptt:{self.bptt} p_bptt:{self.p_bptt} shuffle:{self.shuffle} backwards:{self.backwards}" )  
-
+        
+    def __len__(self) -> int: return self.ite_len
 
     def allocate_buffers(self):     
         "allocate the required worth-case batchbuffer"
@@ -67,13 +49,13 @@ class MyLanguageModelLoader():
         self.idx = MyLanguageModelLoader.CircularIndex(len(self.dataset.x.items), not self.backwards)        
 
         #The batches vary uniformly around bppt as defined by p_bptt
-        max_batch_element = self.bs * (1 + math.ceil( self.bptt*(1+0.5*self.p_bptt) ) )
+        max_batch_element = int( self.bs * (1 + math.ceil( self.bptt*(1+0.5*self.p_bptt) ) ) )
         self.buffer       = np.zeros(max_batch_element, dtype=np.long)
         
         if self.bl == BatchLayout.Parallel:
             self.ei = np.zeros(self.bs, dtype=np.int)
             self.eo = np.zeros(self.bs, dtype=np.int)
-        print(f"LanguageModelLoader.allocate_buffers shuffle:{self.shuffle} backwards:{self.backwards}" )  
+        print(f"LanguageModelLoader.allocate_buffers shuffle:{self.shuffle} backwards:{self.backwards} self.ite_len:{self.ite_len}" )  
         
     def __iter__(self):
         if getattr(self.dataset, 'item', None) is not None: 
@@ -81,79 +63,120 @@ class MyLanguageModelLoader():
 
         #allocate buffers lazily in order to avoid vasting memory on fix_ds which is not always used/may never of ULMFit
         if self.idx is None: self.allocate_buffers()
-        if self.shuffle: self.idx.shuffle()
+        if self.shuffle:     self.idx.shuffle()
 
         if self.bl == BatchLayout.Parallel:
-            self.eo *= 0 
-            step     = len(self.idx)//self.bs #step is truncated => batches may overlap a bit
-            for i in range(self.bs): self.ei[i] = i*step
-                
-            #print(f"self.ite_len:{self.ite_len} dataset.x.items:{len(self.dataset.x.items)}self.idx:{len(self.idx)} step:{step}")    
-            #print(f"self.ei:\n{self.ei}")
+            #It runs thourgh the rags and set an offset where each row in the batch begins
+            #It reproduces how sgugger composes the offset of batches. This could be done in a much simpler 
+            # by deviating from sguggers approach
             
-            #track the iterations for print
-            self.eit = np.zeros((self.bs,self.ite_len), dtype=np.int)
-            self.eot = np.zeros((self.bs,self.ite_len), dtype=np.int)
+            #stepTokens = int(math.ceil( self.totalToks/self.bs)) 
+            stepTokens = self.totalToks/self.bs 
+            self.ei[0] = self.eo[0] = i_row = countTokens = 0
+            for i in range( len( self.dataset.x.items) ):
+                countTokens += len( self.dataset.x.items[self.idx[i]] )
+                while countTokens > int( (i_row+1) * stepTokens) and i_row+1 < self.bs:
+                    i_row         += 1
+                    self.ei[i_row] = i
+                    self.eo[i_row] = countTokens - int(i_row*stepTokens)
+
+            #print out for testing 
+            lns = np.zeros_like(self.ei, dtype=np.int)
+            for i,ei in enumerate(self.ei):lns[i] = len(self.dataset.x.items[self.idx[ei]])
+            print( pd.DataFrame(data=np.stack([self.ei,self.eo,lns],axis=0).T,columns=["ei","eo","length"]) )
+            self.sql = np.zeros((1,self.ite_len), dtype=np.int)
         else:
             self.ei,self.eo = 0,0
 
         i = 0
-        while i < self.ite_len:
-            self.i=i  
-            seq_len = int(self.bptt*(1. + self.p_bptt*(np.random.random() - 0.5)))
-            nToks   = self.bs*(seq_len+1)
+        countToks = 0
+        while i < self.ite_len: 
+            #load max batch first in order to reduce fragmentation i pytorch/GPU
+            if self.first and i == 0: self.first,seq_len = False, int(self.buffer.size/self.bs - 1)
+            else:                     seq_len = int( math.ceil(self.bptt*(1. + self.p_bptt*(np.random.random() - 0.5))) )
+
+            nToks      = self.bs*(seq_len+1)
+            countToks +=nToks #for printout
 
             if self.bl == BatchLayout.Parallel:
                 data = self.buffer[:nToks].reshape(self.bs,-1)
-                self.parallel_fill_buffer(data, self.ei,self.eo)
-                
-                self.eit[:,i] = self.ei[:] #only for test
-                self.eot[:,i] = self.eo[:] #only for test
+                self.parallel_fill_buffer(data, self.ei,self.eo, overlap=1)
             else:    
                 data = self.buffer[:nToks]
-                self.ei, self.eo = self.fill_row(data,self.ei, self.eo)
+                self.ei, self.eo = self.fill_row(data,self.ei, self.eo, overlap=1)
                 data = data.reshape(self.bs,-1)
 
             data  = torch.as_tensor( data, dtype=torch.long )
-            res   = data[:,0:seq_len-1], data[:,1:seq_len]        
+            res   = data[:,0:seq_len], data[:,1:seq_len+1]        
             i    += 1
-            #if i==self.ite_len : print(res) # check that y is shift to predict x       
             yield res  
 
-            #MyLanguageModelLoader.testSaveIndexes(Path.cwd()/"test.csv",self.bs,self.eit,self.eot,self.idx,self.dataset.x.items)
+        print(f"len(self):{len(self)} Number of iteration:{i}")
+        print(f"\n\nself.ite_len:{self.ite_len} Number of iterations:{i} countToks:{countToks} self.totalToks:{self.totalToks} countToks < self.totalToks:{countToks < self.totalToks}")    
+        for i,ei in enumerate(self.ei):lns[i] = len(self.dataset.x.items[self.idx[ei]])
+        print( pd.DataFrame(data=np.stack([self.ei,self.eo,lns],axis=0).T,columns=["ei","eo","length"]) )
+        print(f"\n\n")
 
 
-    def fill_row(self, row, ei,eo):
+    def fill_row(self, row, ei, eo, overlap):
         "new the tokens in the buffer with nToks from the ragged array"
         #nToks: number of tokens to be extract to row
-        #ei: index of the first rag to be extract. Returned as index to the next rag to be extracted
-        #eo: index to the first token to be extracted in the first rag. Returned pointing to the next token to be extract in the last rag
-        
+        #ei:    index of the first rag to be extract. Returned as index to the next rag to be extracted
+        #eo:    index to the first token to be extracted in the first rag. Returned pointing to the next 
+        #       token to be extract in the last rag        
+        ibuf, nToks = 0, row.size
+        items = self.dataset.x.items
+        bi,bo = ei,eo
+        while nToks > ibuf:   
+            rag   = items[self.idx[ei]]
+            if ibuf==0: print( f"BEGIN: ei:{ei} eo:{eo} len(rag):{len(rag)} nToks:{nToks} ibuf:{ibuf} bi:{bi} bo:{bo} first toke:{rag[eo]}" )
+            eo    = eo if ibuf==0 else 0         
+            n     = min(len(rag) - eo, nToks - ibuf)
+            print( f"ITE:  ei:{ei} eo:{eo} len(rag):{len(rag)} nToks:{nToks} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo+n-1]}" )
+            row[ibuf:ibuf+n] = rag[eo:eo+n]
+            ibuf += n
+            if ibuf < nToks: ei += 1
+            elif overlap==1: 
+                eo += n-overlap
+                print(f"ENDB:ei:{ei} eo:{eo} nToks:{nToks} ibuf:{ibuf} bi:{bi} bo:{bo} next first tok:{rag[eo]}" )
+            else: raise ValueError("overlap != 1 has not been implmented")
+
+        return ei,eo
+
+    def fill_row_2(self, row, ei, eo, overlap):
+        "new the tokens in the buffer with nToks from the ragged array"
+        #nToks: number of tokens to be extract to row
+        #ei:    index of the first rag to be extract. Returned as index to the next rag to be extracted
+        #eo:    index to the first token to be extracted in the first rag. Returned pointing to the next 
+        #       token to be extract in the last rag        
         ibuf, j, nToks = 0, ei, row.size
         items = self.dataset.x.items
+        bi,bo = ei,
         while nToks > ibuf:   
-            i   = self.idx[j]
-            rag = items[i]
-            r0  = eo if j==ei else 0         
+            rag = items[self.idx[j]]
+            r0  = eo if ibuf==0 else 0         
             r1  = len(rag)
-            rl  = r1 - r0
-            if ibuf+rl >= nToks:
-                eo = (nToks + eo) if j==ei else (nToks-ibuf) 
-                ei = j
-                r1 = eo
-                rl = r1 - r0
-            row[ibuf:ibuf+rl] = rag[r0:r1]
-            ibuf += rl
-            j    += 1 
-        #if self.ei==bi: print( f"one rag:{self.ei==bi} nToks:{nToks} nBToks:{ibuf} bi:{bi} bo:{bo} ei:{self.ei} eo:{self.eo}" 
-        return ei,eo    
+            n   = min(r1 - r0,nToks - ibuf)
+            row[ibuf:ibuf+n] = rag[r0:r0+n]
+            ibuf += n
+            j    += 1
+            if ibuf==nToks:
+                #the following overlap is not general yet
+                n -= overlap #the is an overlap of 1 token between the previous and the next sequence 
 
-    def parallel_fill_buffer(self, data, ei, eo):
+                #print(f"r0+n:{r0+n} len(rag):{len(rag)}")
+                eo = 0 if r0+n==len(rag) else r0 + n 
+                ei = j if r0+n==len(rag) else j  - 1 
+
+            #print( f"j:{j} len(rag):{len(rag)} nToks:{nToks} ibuf:{ibuf} rl:{n} bi:{bi} bo:{bo} ei:{ei} eo:{eo}" )
+        return ei,eo
+
+    def parallel_fill_buffer(self, data, ei, eo, overlap):
         "data, ei, eo are passed by ref so updating then here updates the arrays in caller"
         for j in range(len(data)):
-            ei[j],eo[j] = self.fill_row(data[j],ei[j],eo[j])
+            #print(f"row:{j}")
+            ei[j],eo[j] = self.fill_row( data[j], ei[j], eo[j], overlap)
 
-    def __len__(self) -> int: return self.ite_len
     def __getattr__(self,k:str)->Any: return getattr(self.dataset, k)
 
     @property
@@ -166,11 +189,10 @@ class MyLanguageModelLoader():
 class MyTextLMDataBunch(TextLMDataBunch):
     "Create a `TextDataBunch` suitable for training a language model."
     @classmethod
-    def from_ids(cls, path:PathOrStr, vocab:Vocab, 
-                 train_ids:Collection[Collection[int]],        valid_ids:Collection[Collection[int]],
-                 test_ids:Collection[Collection[int]]=None, 
-                 train_lbls:Collection[Union[int,float]]=None, valid_lbls:Collection[Union[int,float]]=None, 
-                 classes:Collection[Any]=None, processor:PreProcessor=None, **kwargs) -> DataBunch:
+    def from_ids(cls, path:PathOrStr, vocab:Vocab, train_ids:Collection[Collection[int]], valid_ids:Collection[Collection[int]],
+                 test_ids:Collection[Collection[int]]=None, train_lbls:Collection[Union[int,float]]=None, 
+                 valid_lbls:Collection[Union[int,float]]=None, classes:Collection[Any]=None, 
+                 processor:PreProcessor=None, **kwargs) -> DataBunch:
         "Create a `TextDataBunch` from ids, labels and a `vocab`."
         src = LabelLists(path, TextList(train_ids, vocab, path=path, processor=[]),
                                TextList(valid_ids, vocab, path=path, processor=[]))
@@ -185,7 +207,7 @@ class MyTextLMDataBunch(TextLMDataBunch):
         src.train.x._bunch = MyTextLMDataBunch
         src.valid.x._bunch = MyTextLMDataBunch
         return src.databunch(**kwargs)
-    
+
     #need customized version of this in order to set MyLanguageModelLoader
     @classmethod
     def create(cls, train_ds, valid_ds, test_ds=None, path:PathOrStr='.', no_check:bool=False, **kwargs) -> DataBunch:
