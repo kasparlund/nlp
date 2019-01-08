@@ -9,9 +9,7 @@ class MyLanguageModelLoader():
     
     class CircularIndex():
         #When the index exceeds the length of self.idx then it is wrap to start at the head 
-        #or the end if indexing is moving backwards. 
-        # The shuffled is done in-place, 
-
+        #or the end if indexing is moving backwards. The shuffled is done in-place, 
         def __init__(self, length:int, forward:bool): 
             self.idx      = np.arange(length)
             self.forward_ = forward
@@ -23,21 +21,19 @@ class MyLanguageModelLoader():
         def forward(self, forward:bool=True): self.forward_ = forward
 
     def __init__(self, dataset:LabelList, bs:int=64, bptt:int=70, backwards:bool=False, shuffle:bool=False,
-                 max_len:int=25, p_bptt:int=0.95, bl:BatchLayout=BatchLayout.Parallel):
-        self.init_kwargs = dict(bs=bs, bptt=bptt, backwards=backwards, shuffle=shuffle, max_len=max_len)
-        self.dataset,self.bs,self.bptt,self.backwards,self.shuffle,self.p_bptt = dataset,bs,bptt,backwards,shuffle,p_bptt
+                 p_bptt:int=0.0, bl:BatchLayout=BatchLayout.Parallel):
+        self.init_kwargs = dict(bs=bs, bptt=bptt, backwards=backwards, shuffle=shuffle)
+        self.dataset,self.bs,self.bptt,self.p_bptt,self.shuffle,self.backwards = dataset,bs,bptt,p_bptt,shuffle,backwards
         
         nToks = 0
         for i,s in enumerate(dataset.x.items): nToks += len(s)
         self.totalToks   = nToks    
         self.ite_len     = math.ceil( nToks / (self.bs*self.bptt) )
         self.idx         = None
-        self.buffer      = None
-        self.num_workers = 0
+        self.npStorage   = None
         self.bl          = bl        
         self.first       = True
-        #print(f"LanguageModelLoader.__init__ iterations:{len(self)} rags:{len(self.dataset.x.items)} nToks:{nToks} "+\
-        #      f"bptt:{self.bptt} p_bptt:{self.p_bptt} shuffle:{self.shuffle} backwards:{self.backwards}" )  
+        self.num_workers = 0 # how is num_workers used here ?
 
     def __len__(self) -> int: return self.ite_len
 
@@ -47,12 +43,19 @@ class MyLanguageModelLoader():
 
         #The batches vary uniformly around bppt in the interval bppt + p_bptt*bppt
         max_batch_element = int( self.bs * (1 + math.ceil( self.bptt*(1+0.5*self.p_bptt) ) ) )
-        self.buffer       = np.zeros(max_batch_element, dtype=np.long)
+        self.npStorage    = np.zeros(max_batch_element, dtype=np.int64)
         
         if self.bl == BatchLayout.Parallel:
             self.ei = np.zeros(self.bs, dtype=np.int)
             self.eo = np.zeros(self.bs, dtype=np.int)
-        
+
+    def print_ei_eo(self, title:str):
+        #usefull for verification that each row uses all its data
+        lns = np.zeros_like(self.ei, dtype=np.int)
+        for i,ei in enumerate(self.ei):lns[i] = len(self.dataset.x.items[self.idx[ei]])
+        print(title)
+        print( pd.DataFrame(data=np.stack([self.ei,self.eo,lns],axis=0).T,columns=["ei","eo","length"]) )
+
     def __iter__(self):
         if getattr(self.dataset, 'item', None) is not None: 
             yield LongTensor(getattr(self.dataset, 'item'))[None],LongTensor([0])
@@ -72,43 +75,29 @@ class MyLanguageModelLoader():
                     i_row         += 1
                     self.ei[i_row] = i
                     self.eo[i_row] = countTokens - int(i_row*stepTokens) - 1
-
-            #print out for verification 
-            #lns = np.zeros_like(self.ei, dtype=np.int)
-            #for i,ei in enumerate(self.ei):lns[i] = len(self.dataset.x.items[self.idx[ei]])
-            #print( pd.DataFrame(data=np.stack([self.ei,self.eo,lns],axis=0).T,columns=["ei","eo","length"]) )
+            #self.print_ei_eo("start of epoch")
         else:
             self.ei,self.eo = 0,0
 
         i = 0
         countToks = 0
         while i < self.ite_len: 
-            #load max batch first in order to reduce fragmentation i pytorch/GPU!
-            if self.first and i == 0: self.first,seq_len = False, int(self.buffer.size/self.bs - 1)
+            #load max batch first, in order to reduce fragmentation i pytorch/GPU!
+            if self.first and i == 0: self.first,seq_len = False, int(self.npStorage.size/self.bs - 1)
             else:                     seq_len = int( math.ceil(self.bptt*(1. + self.p_bptt*(np.random.random() - 0.5))) )
-
             nToks = self.bs*(seq_len+1)
 
             if self.bl == BatchLayout.Parallel:
-                data = self.buffer[:nToks].reshape(self.bs,-1)
-                self.parallel_fill_buffer(self.dataset.x.items, self.idx, data, self.ei, self.eo, overlap=1)
+                batchView = self.npStorage[:nToks].reshape(self.bs,-1)
+                self.parallel_fill_buffer(self.dataset.x.items, self.idx, batchView, self.ei, self.eo, overlap=1)
             else:    
-                data = self.buffer[:nToks]
-                self.ei, self.eo = self.fill_row(self.dataset.x.items, self.idx, data, self.ei, self.eo, overlap=1)
-                data = data.reshape(self.bs,-1)
+                batchView = self.npStorage[:nToks]
+                self.ei, self.eo = self.fill_row(self.dataset.x.items, self.idx, batchView, self.ei, self.eo, overlap=1)
+                batchView = batchView.reshape(self.bs,-1)
 
-            data  = torch.as_tensor( data, dtype=torch.long )
-            res   = data[:,0:seq_len], data[:,1:seq_len+1]        
-            i    += 1
-
-            #countToks +=nToks #for printout
-            yield res  
-
-        #print(f"len(self):{len(self)} Number of iteration:{i}")
-        #print(f"\n\nself.ite_len:{self.ite_len} Number of iterations:{i} countToks:{countToks} self.totalToks:{self.totalToks} countToks < self.totalToks:{countToks < self.totalToks}")    
-        #for i,ei in enumerate(self.ei):lns[i] = len(self.dataset.x.items[self.idx[ei]])
-        #print( pd.DataFrame(data=np.stack([self.ei,self.eo,lns],axis=0).T,columns=["ei","eo","length"]) )
-        #print(f"\n\n")
+            i += 1
+            yield torch.from_numpy(batchView[:,0:seq_len]), torch.from_numpy(batchView[:,1:seq_len+1])
+        #self.print_ei_eo("end of epoch")
 
 
     def fill_row(self, items, idx, row, ei, eo, overlap):
@@ -152,6 +141,8 @@ class MyLanguageModelLoader():
 
     def batchify(self, data:np.ndarray) -> LongTensor: pass
 
+
+#this class is only to ensure that MyLanguageModelLoader gets loaded instead of LanguageModelLoader
 class MyTextLMDataBunch(TextLMDataBunch):
     "Create a `TextDataBunch` suitable for training a language model."
     @classmethod
