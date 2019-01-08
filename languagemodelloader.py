@@ -86,6 +86,7 @@ class MyLanguageModelLoader():
             if self.first and i == 0: self.first,seq_len = False, int(self.npStorage.size/self.bs - 1)
             else:                     seq_len = int( math.ceil(self.bptt*(1. + self.p_bptt*(np.random.random() - 0.5))) )
             nToks = self.bs*(seq_len+1)
+            countToks+=nToks   
 
             if self.bl == BatchLayout.Parallel:
                 batchView = self.npStorage[:nToks].reshape(self.bs,-1)
@@ -98,7 +99,7 @@ class MyLanguageModelLoader():
             i += 1
             yield torch.from_numpy(batchView[:,0:seq_len]), torch.from_numpy(batchView[:,1:seq_len+1])
         #self.print_ei_eo("end of epoch")
-
+        print(f"totalToks:{self.totalToks} processedTokens:{countToks} processedTokens-totalToks:{countToks-self.totalToks}")
 
     def fill_row(self, items, idx, row, ei, eo, overlap):
         "new the tokens in the buffer with nToks from the ragged array"
