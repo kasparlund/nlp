@@ -55,7 +55,7 @@ class MyLanguageModelLoader():
         for i,ei in enumerate(self.ei):lns[i] = len(self.dataset.x.items[self.idx[ei]])
         print(title)
         print( pd.DataFrame(data=np.stack([self.ei,self.eo,lns],axis=0).T,columns=["ei","eo","length"]) )
-
+    import pdb
     def __iter__(self):
         if getattr(self.dataset, 'item', None) is not None: 
             yield LongTensor(getattr(self.dataset, 'item'))[None],LongTensor([0])
@@ -63,75 +63,126 @@ class MyLanguageModelLoader():
         #allocate buffers lazily in order to avoid vasting memory on fix_ds which is not always or never for ULMFit
         if self.idx is None: self.allocate_buffers()
         if self.shuffle:     self.idx.shuffle()
-        if self.backwards: raise ValueError("backwards is not been implmented yet")
+        self.idx.forward(self.backwards is False) 
 
         if self.bl == BatchLayout.Parallel:
-            #Runs throurh the rags and set an offset where each row in the batch begins
-            stepTokens = self.totalToks/self.bs 
-            self.ei[0] = self.eo[0] = i_row = countTokens = 0
-            for i in range( len( self.dataset.x.items) ):
-                countTokens += len( self.dataset.x.items[self.idx[i]] )
-                while countTokens > int( (i_row+1) * stepTokens) and i_row+1 < self.bs:
-                    i_row         += 1
-                    self.ei[i_row] = i
-                    self.eo[i_row] = countTokens - int(i_row*stepTokens) - 1
-            #self.print_ei_eo("start of epoch")
+            #delta_rags = len(self.dataset.x.items)/self.bs
+            #print("delta_rags", delta_rags)
+            #for i in range (self.bs):
+            #    self.ei[i] = int(round(i*delta_rags))
+            #    self.eo[i] = len( self.dataset.x.items[self.idx[i]] ) if self.backwards else 0
+
+            #Runs throurh the rags and set an offset where each row in the batch begins.
+            #the number fo tokens in the rag counting from offset must be > 0
+            #ie:  ( eo[i] if self.backwards else len(rag)-eo[i] ) > 0 
+            stepTokens = self.totalToks / self.bs
+            self.ei[0] = i_row = countTokens = 0
+            self.eo[0] = len( self.dataset.x.items[self.idx[0]] )-1 if self.backwards else 0
+            print("steptokens:",stepTokens)
+            i_rag  = 0
+            ln_rag = len( self.dataset.x.items[self.idx[0]] )
+            print(f"i_rag:{i_rag} ln_rag:{ln_rag} countTokens:{countTokens} int(stepTokens):{int(stepTokens)}")    
+            for i in range(0,self.bs):
+                while ln_rag <= int(stepTokens * i) - countTokens :
+                    countTokens += ln_rag
+                    i_rag       += 1
+                    ln_rag       = len( self.dataset.x.items[self.idx[i_rag]] )
+
+                self.ei[i] = i_rag
+                self.eo[i] = int(stepTokens * i) - countTokens
+                print(f"i_rag:{i_rag} ln_rag:{ln_rag} int(stepTokens * i):{int(stepTokens * i)} countTokens:{countTokens} self.eo[i]:{self.eo[i]} ")    
+            self.print_ei_eo("start of epoch")
         else:
             self.ei,self.eo = 0,0
 
         i = 0
-        countToks = 0
+        overlap=1
+        print("start iterations")
         while i < self.ite_len: 
             #load max batch first, in order to reduce fragmentation i pytorch/GPU!
             if self.first and i == 0: self.first,seq_len = False, int(self.npStorage.size/self.bs - 1)
             else:                     seq_len = int( math.ceil(self.bptt*(1. + self.p_bptt*(np.random.random() - 0.5))) )
             nToks = self.bs*(seq_len+1)
-            countToks+=nToks   
 
             if self.bl == BatchLayout.Parallel:
                 batchView = self.npStorage[:nToks].reshape(self.bs,-1)
-                self.parallel_fill_buffer(self.dataset.x.items, self.idx, batchView, self.ei, self.eo, overlap=1)
+                self.parallel_fill(self.dataset.x.items, self.idx, batchView, self.ei, self.eo, overlap, self.backwards)
             else:    
                 batchView = self.npStorage[:nToks]
-                self.ei, self.eo = self.fill_row(self.dataset.x.items, self.idx, batchView, self.ei, self.eo, overlap=1)
+                if  backwards:self.ei, self.eo = self.fill_row_backwards(self.dataset.x.items,self.idx, batchView,\
+                                                               self.ei, self.eo, overlap)
+                else:         self.ei, self.eo = self.fill_row(self.dataset.x.items, self.idx, batchView,\
+                                                               self.ei, self.eo, overlap)
                 batchView = batchView.reshape(self.bs,-1)
 
             i += 1
             yield torch.from_numpy(batchView[:,0:seq_len]), torch.from_numpy(batchView[:,1:seq_len+1])
-        #self.print_ei_eo("end of epoch")
+        self.print_ei_eo("end of epoch")
 
-    def fill_row(self, items, idx, row, ei, eo, overlap):
-        "new the tokens in the buffer with nToks from the ragged array"
+    def fill_forward(self, items, idx, row, ei, eo, overlap,rowid):
+        "fill the row with tokens reading forwards from the ragged array"
         #items:   the ragged/jagged array 
         #idx:     used to index into items so that shuffle is used - if idx has been shuffled 
         #row:     a row in teh batch to be filled with consequetive tokens
         #ei:      index of the first rag to be extract. Returs as index to the next rag to be extracted
         #eo:      index to the first token to be extracted in the first rag. Returs pointing to the next to be extract in the last rag
         #overlap: overlap=1 between batches, because we only predict the next token
-
-        #bi,bo = ei,eo
-        #print(f"BEGIN:rowid:{rowid} ei:{ei} eo:{eo} nToks:{nToks} bi:{bi} bo:{bo}" )
+        bi,bo = ei,eo
+        print(f"BEGIN:rowid:{rowid} ei:{ei} eo:{eo} row.size:{row.size} bi:{bi} bo:{bo}" )
         ibuf = 0
         ei  -= 1 
         while ibuf < row.size:  
             ei   += 1 
             rag   = items[idx[ei]]
-            #if ibuf==0: print( f"BEGIN: ei:{ei} eo:{eo} len(rag):{len(rag)} nToks:{nToks} ibuf:{ibuf} bi:{bi} bo:{bo} first toke:{rag[eo]}" )
-            eo    = eo if ibuf==0 else 0         
+            if ibuf==0: print( f"BEGIN: ei:{ei} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} bi:{bi} bo:{bo} first toke:{rag[eo]}" )
+            eo    = eo if ibuf==0 else 0
             n     = min(len(rag) - eo, row.size - ibuf)
-            #print( f"ITE:  ei:{ei} eo:{eo} len(rag):{len(rag)} nToks:{nToks} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo+n-1]}" )
+            print( f"ITE:  ei:{ei} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo+n-1]}" )
             row[ibuf:ibuf+n] = rag[eo:eo+n]
             ibuf += n
-        if overlap == 1:  eo += n-overlap
-            #print(f"ENDB:ei:ei:{ei} eo:{eo} len(rag):{len(rag)} nToks:{nToks} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo]}" )
-        else: raise ValueError("overlap != 1 has not been implmented")
+        if overlap == 1:  
+            eo += n-overlap
+            print(f"ENDB:ei:ei:{ei} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo]}" )
+        else: raise ValueError("overlap != 1 has not been implemented")
 
         return ei,eo
 
-    def parallel_fill_buffer(self, items, idx, batch, ei, eo, overlap):
+    def fill_backward(self, items, idx, row, ei, eo, overlap,rowid):
+        "fill the row with tokens reading backwards from the ragged array"
+        bi,bo = ei,eo
+        print(f"BEGIN:rowid:{rowid} ei:{ei} eo:{eo} row.size:{row.size} bi:{bi} bo:{bo}" )
+        ibuf = 0
+        ei  -= 1 
+        while ibuf < row.size:  
+            ei   += 1 
+            i     = idx[ei]
+            rag   = items[idx[ei]]
+            if ibuf==0: print( f"BEGIN:ei:{ei} i:{i} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} bi:{bi} bo:{bo} first toke:{rag[eo]}" )
+            eo    = eo if ibuf==0 else len(rag)
+            n     = min(eo, row.size - ibuf) 
+            print( f"ITE:  ei:{ei} i:{i} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo-n]}" )
+            row[ibuf:ibuf+n] = rag[eo-n:eo][::-1]
+            ibuf += n
+        if overlap == 1:  
+            if n == 1: ei -= 1
+            else     : 
+                eo -= n-overlap
+                print(f"ENDB:ei:ei:{ei} i:{i} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo}" )
+                print(f"ENDB2:last toke:{rag[eo]}")
+        else: raise ValueError("overlap != 1 has not been implemented")
+
+        return ei,eo
+
+    def row_fill(self, items, idx, batch, ei, eo, overlap, backwards):
+        if backwards:self.ei, self.eo = self.fill_forward( self.dataset.x.items, self.idx, batchView, self.ei, self.eo, overlap)
+        else:        self.ei, self.eo = self.fill_backward(self.dataset.x.items, self.idx, batchView, self.ei, self.eo, overlap)
+
+    def parallel_fill(self, items, idx, batch, ei, eo, overlap, backwards):
         "data, ei, eo are passed by ref so updating then here updates the arrays in caller"
-        for j in range(len(batch)):
-            ei[j],eo[j] = self.fill_row( items, idx, batch[j], ei[j], eo[j], overlap )
+        if backwards: 
+            for j in range(len(batch)): ei[j],eo[j] = self.fill_backward( items, idx, batch[j], ei[j], eo[j], overlap, j )
+        else:         
+            for j in range(len(batch)): ei[j],eo[j] = self.fill_forward(  items, idx, batch[j], ei[j], eo[j], overlap, j )
 
     def __getattr__(self,k:str)->Any: return getattr(self.dataset, k)
 
