@@ -99,7 +99,6 @@ class MyLanguageModelLoader():
             i += 1
             yield torch.from_numpy(batchView[:,0:seq_len]), torch.from_numpy(batchView[:,1:seq_len+1])
         #self.print_ei_eo("end of epoch")
-        print(f"totalToks:{self.totalToks} processedTokens:{countToks} processedTokens-totalToks:{countToks-self.totalToks}")
 
     def fill_row(self, items, idx, row, ei, eo, overlap):
         "new the tokens in the buffer with nToks from the ragged array"
@@ -113,7 +112,9 @@ class MyLanguageModelLoader():
         #bi,bo = ei,eo
         #print(f"BEGIN:rowid:{rowid} ei:{ei} eo:{eo} nToks:{nToks} bi:{bi} bo:{bo}" )
         ibuf = 0
-        while ibuf < row.size:   
+        ei  -= 1 
+        while ibuf < row.size:  
+            ei   += 1 
             rag   = items[idx[ei]]
             #if ibuf==0: print( f"BEGIN: ei:{ei} eo:{eo} len(rag):{len(rag)} nToks:{nToks} ibuf:{ibuf} bi:{bi} bo:{bo} first toke:{rag[eo]}" )
             eo    = eo if ibuf==0 else 0         
@@ -121,10 +122,9 @@ class MyLanguageModelLoader():
             #print( f"ITE:  ei:{ei} eo:{eo} len(rag):{len(rag)} nToks:{nToks} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo+n-1]}" )
             row[ibuf:ibuf+n] = rag[eo:eo+n]
             ibuf += n
-            if ibuf < row.size: ei += 1
-            elif overlap == 1:  eo += n-overlap
-                #print(f"ENDB:ei:ei:{ei} eo:{eo} len(rag):{len(rag)} nToks:{nToks} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo]}" )
-            else: raise ValueError("overlap != 1 has not been implmented")
+        if overlap == 1:  eo += n-overlap
+            #print(f"ENDB:ei:ei:{ei} eo:{eo} len(rag):{len(rag)} nToks:{nToks} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo]}" )
+        else: raise ValueError("overlap != 1 has not been implmented")
 
         return ei,eo
 
