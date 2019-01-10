@@ -67,19 +67,21 @@ class MyLanguageModelLoader():
         self.idx.forward(self.backwards is False) 
 
         if self.bl == BatchLayout.Parallel:
-            stepTokens = self.totalToks / self.bs
+            step = self.totalToks / self.bs
             ln_rag = countTokens = 0
             i_rag  = -1
-            if self.log: print(f"stepTokens:{stepTokens}")
+            if self.log: print(f"step:{step}")
             for i in range(0,self.bs):
-                while ln_rag <= int(stepTokens * i) - countTokens :
+                while ln_rag <= int(step * i) - countTokens :
                     countTokens += ln_rag
                     i_rag       += 1
                     ln_rag       = len( self.dataset.x.items[self.idx[i_rag]] )
 
                 self.ei[i] = i_rag
-                self.eo[i] = ln_rag - int(stepTokens * i - countTokens) if self.backwards else int(stepTokens * i - countTokens) 
-                if self.log: print(f"i_rag:{i_rag} ln_rag:{ln_rag} int(stepTokens * i):{int(stepTokens * i)} countTokens:{countTokens} self.eo[i]:{self.eo[i]} ")    
+                self.eo[i] = ( ln_rag - int(step * i - countTokens) ) if self.backwards else int(step * i - countTokens)
+
+                if self.log : print(f"i_rag:{i_rag} ln_rag:{ln_rag} int(step * i):{int(step * i)} countTokens:{countTokens} "+\
+                                f"self.eo[i]:{self.eo[i]}")    
             #self.print_ei_eo("start of epoch")
         else:
             self.ei,self.eo = 0,0
@@ -144,17 +146,15 @@ class MyLanguageModelLoader():
             ei   += 1 
             i     = idx[ei]
             rag   = items[idx[ei]]
-            if ibuf==0: print( f"BEGIN:ei:{ei} i:{i} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} bi:{bi} bo:{bo} first toke:{rag[eo-1]}" )
+            #if ibuf==0: print( f"BEGIN:ei:{ei} i:{i} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} bi:{bi} bo:{bo} first toke:{rag[eo-1]}" )
             eo    = eo if ibuf==0 else len(rag)
             n     = min(eo, row.size - ibuf) 
-            print( f"ITE:  ei:{ei} i:{i} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo-n-1]}" )
+            #print( f"ITE:  ei:{ei} i:{i} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo-n-1]}" )
             row[ibuf:ibuf+n] = rag[eo-n:eo][::-1]
             ibuf += n
         if overlap == 1:  
-            if n == 1: ei -= 1
-            else     : 
-                eo -= n-overlap
-                print(f"ENDB:ei:ei:{ei} i:{i} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} ENDB2:last toke:{rag[eo-1]}")
+            eo -= n-overlap
+            #print(f"2 ENDB:ei:{ei} i:{i} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} ENDB2:last toke:{rag[eo-1]}")
         else: raise ValueError("overlap != 1 has not been implemented")
 
         return ei,eo
@@ -185,29 +185,25 @@ class MyTextLMDataBunch(TextLMDataBunch):
     "Create a `TextDataBunch` suitable for training a language model."
     @classmethod
     def from_ids(cls, path:PathOrStr, vocab:Vocab, train_ids:Collection[Collection[int]], valid_ids:Collection[Collection[int]],
-                 test_ids:Collection[Collection[int]]=None, train_lbls:Collection[Union[int,float]]=None, 
-                 valid_lbls:Collection[Union[int,float]]=None, classes:Collection[Any]=None, 
+                 test_ids:Collection[Collection[int]]=None, train_lbls:Collection[Union[int,float]]=None,
+                 valid_lbls:Collection[Union[int,float]]=None, classes:Collection[Any]=None,
                  processor:PreProcessor=None, **kwargs) -> DataBunch:
         "Create a `TextDataBunch` from ids, labels and a `vocab`."
-        src = LabelLists(path, TextList(train_ids, vocab, path=path, processor=[]),
-                               TextList(valid_ids, vocab, path=path, processor=[]))
-        #src = src.label_for_lm() if cls==TextLMDataBunch else src.label_from_lists(train_lbls, valid_lbls, classes=classes, processor=[]) 
-        src.train = src.train.label_for_lm()
-        src.valid = src.valid.label_for_lm()
-
-        #if test_ids is not None: src.add_test(TextList(test_ids, vocab, path=path), label=train_lbls[0])
-        #src.valid.x.processor = ifnone(processor, [TokenizeProcessor(), NumericalizeProcessor(vocab=vocab)])
-       
-        #ensure our create is called
+        src = ItemLists(path, TextList(train_ids, vocab, path=path, processor=[]),
+                        TextList(valid_ids, vocab, path=path, processor=[]))
+        src = src.label_for_lm() if cls==TextLMDataBunch else src.label_from_lists(train_lbls, valid_lbls, classes=classes, processor=[])
+        if test_ids is not None: src.add_test(TextList(test_ids, vocab, path=path), label=train_lbls[0])
+        src.valid.x.processor = ifnone(processor, [TokenizeProcessor(), NumericalizeProcessor(vocab=vocab)])
+        
         src.train.x._bunch = MyTextLMDataBunch
         src.valid.x._bunch = MyTextLMDataBunch
+        src.test.x._bunch  = MyTextLMDataBunch
         return src.databunch(**kwargs)
 
     #need customized version of this in order to set MyLanguageModelLoader
     @classmethod
     def create(cls, train_ds, valid_ds, test_ds=None, path:PathOrStr='.', no_check:bool=False, **kwargs) -> DataBunch:
         "Create a `TextDataBunch` in `path` from the `datasets` for language modelling."
-        print("MyTextLMDataBunch def create")
-        datasets    = cls._init_ds(train_ds, valid_ds, test_ds)
+        datasets = cls._init_ds(train_ds, valid_ds, test_ds)
         dataloaders = [MyLanguageModelLoader(ds, shuffle=(i==0), **kwargs) for i,ds in enumerate(datasets)]
         return cls(*dataloaders, path=path, no_check=no_check)
