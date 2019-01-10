@@ -21,7 +21,7 @@ class MyLanguageModelLoader():
         def forward(self, forward:bool=True): self.forward_ = forward
 
     def __init__(self, dataset:LabelList, bs:int=64, bptt:int=70, backwards:bool=False, shuffle:bool=False,
-                 p_bptt:int=0.0, bl:BatchLayout=BatchLayout.Parallel):
+                 p_bptt:int=0.0, bl:BatchLayout=BatchLayout.Parallel, log=False):
         self.init_kwargs = dict(bs=bs, bptt=bptt, backwards=backwards, shuffle=shuffle)
         self.dataset,self.bs,self.bptt,self.p_bptt,self.shuffle,self.backwards = dataset,bs,bptt,p_bptt,shuffle,backwards
         
@@ -34,6 +34,7 @@ class MyLanguageModelLoader():
         self.bl          = bl        
         self.first       = True
         self.num_workers = 0 # how is num_workers used here ?
+        self.log         = log
 
     def __len__(self) -> int: return self.ite_len
 
@@ -66,22 +67,10 @@ class MyLanguageModelLoader():
         self.idx.forward(self.backwards is False) 
 
         if self.bl == BatchLayout.Parallel:
-            #delta_rags = len(self.dataset.x.items)/self.bs
-            #print("delta_rags", delta_rags)
-            #for i in range (self.bs):
-            #    self.ei[i] = int(round(i*delta_rags))
-            #    self.eo[i] = len( self.dataset.x.items[self.idx[i]] ) if self.backwards else 0
-
-            #Runs throurh the rags and set an offset where each row in the batch begins.
-            #the number fo tokens in the rag counting from offset must be > 0
-            #ie:  ( eo[i] if self.backwards else len(rag)-eo[i] ) > 0 
             stepTokens = self.totalToks / self.bs
-            self.ei[0] = i_row = countTokens = 0
-            self.eo[0] = len( self.dataset.x.items[self.idx[0]] )-1 if self.backwards else 0
-            print("steptokens:",stepTokens)
-            i_rag  = 0
-            ln_rag = len( self.dataset.x.items[self.idx[0]] )
-            print(f"i_rag:{i_rag} ln_rag:{ln_rag} countTokens:{countTokens} int(stepTokens):{int(stepTokens)}")    
+            ln_rag = countTokens = 0
+            i_rag  = -1
+            if self.log: print(f"stepTokens:{stepTokens}")
             for i in range(0,self.bs):
                 while ln_rag <= int(stepTokens * i) - countTokens :
                     countTokens += ln_rag
@@ -89,15 +78,14 @@ class MyLanguageModelLoader():
                     ln_rag       = len( self.dataset.x.items[self.idx[i_rag]] )
 
                 self.ei[i] = i_rag
-                self.eo[i] = int(stepTokens * i) - countTokens
-                print(f"i_rag:{i_rag} ln_rag:{ln_rag} int(stepTokens * i):{int(stepTokens * i)} countTokens:{countTokens} self.eo[i]:{self.eo[i]} ")    
-            self.print_ei_eo("start of epoch")
+                self.eo[i] = ln_rag - int(stepTokens * i - countTokens) if self.backwards else int(stepTokens * i - countTokens) 
+                if self.log: print(f"i_rag:{i_rag} ln_rag:{ln_rag} int(stepTokens * i):{int(stepTokens * i)} countTokens:{countTokens} self.eo[i]:{self.eo[i]} ")    
+            #self.print_ei_eo("start of epoch")
         else:
             self.ei,self.eo = 0,0
 
         i = 0
         overlap=1
-        print("start iterations")
         while i < self.ite_len: 
             #load max batch first, in order to reduce fragmentation i pytorch/GPU!
             if self.first and i == 0: self.first,seq_len = False, int(self.npStorage.size/self.bs - 1)
@@ -117,7 +105,7 @@ class MyLanguageModelLoader():
 
             i += 1
             yield torch.from_numpy(batchView[:,0:seq_len]), torch.from_numpy(batchView[:,1:seq_len+1])
-        self.print_ei_eo("end of epoch")
+        #self.print_ei_eo("end of epoch")
 
     def fill_forward(self, items, idx, row, ei, eo, overlap,rowid):
         "fill the row with tokens reading forwards from the ragged array"
@@ -128,21 +116,21 @@ class MyLanguageModelLoader():
         #eo:      index to the first token to be extracted in the first rag. Returs pointing to the next to be extract in the last rag
         #overlap: overlap=1 between batches, because we only predict the next token
         bi,bo = ei,eo
-        print(f"BEGIN:rowid:{rowid} ei:{ei} eo:{eo} row.size:{row.size} bi:{bi} bo:{bo}" )
+        #print(f"BEGIN:rowid:{rowid} ei:{ei} eo:{eo} row.size:{row.size} bi:{bi} bo:{bo}" )
         ibuf = 0
         ei  -= 1 
         while ibuf < row.size:  
             ei   += 1 
             rag   = items[idx[ei]]
-            if ibuf==0: print( f"BEGIN: ei:{ei} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} bi:{bi} bo:{bo} first toke:{rag[eo]}" )
+            #if ibuf==0: print( f"BEGIN: ei:{ei} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} bi:{bi} bo:{bo} first toke:{rag[eo]}" )
             eo    = eo if ibuf==0 else 0
             n     = min(len(rag) - eo, row.size - ibuf)
-            print( f"ITE:  ei:{ei} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo+n-1]}" )
+            #print( f"ITE:  ei:{ei} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo+n-1]}" )
             row[ibuf:ibuf+n] = rag[eo:eo+n]
             ibuf += n
         if overlap == 1:  
             eo += n-overlap
-            print(f"ENDB:ei:ei:{ei} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo]}" )
+            #print(f"ENDB:ei:ei:{ei} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo]}" )
         else: raise ValueError("overlap != 1 has not been implemented")
 
         return ei,eo
@@ -150,25 +138,23 @@ class MyLanguageModelLoader():
     def fill_backward(self, items, idx, row, ei, eo, overlap,rowid):
         "fill the row with tokens reading backwards from the ragged array"
         bi,bo = ei,eo
-        print(f"BEGIN:rowid:{rowid} ei:{ei} eo:{eo} row.size:{row.size} bi:{bi} bo:{bo}" )
         ibuf = 0
         ei  -= 1 
         while ibuf < row.size:  
             ei   += 1 
             i     = idx[ei]
             rag   = items[idx[ei]]
-            if ibuf==0: print( f"BEGIN:ei:{ei} i:{i} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} bi:{bi} bo:{bo} first toke:{rag[eo]}" )
+            if ibuf==0: print( f"BEGIN:ei:{ei} i:{i} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} bi:{bi} bo:{bo} first toke:{rag[eo-1]}" )
             eo    = eo if ibuf==0 else len(rag)
             n     = min(eo, row.size - ibuf) 
-            print( f"ITE:  ei:{ei} i:{i} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo-n]}" )
+            print( f"ITE:  ei:{ei} i:{i} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo-n-1]}" )
             row[ibuf:ibuf+n] = rag[eo-n:eo][::-1]
             ibuf += n
         if overlap == 1:  
             if n == 1: ei -= 1
             else     : 
                 eo -= n-overlap
-                print(f"ENDB:ei:ei:{ei} i:{i} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo}" )
-                print(f"ENDB2:last toke:{rag[eo]}")
+                print(f"ENDB:ei:ei:{ei} i:{i} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} ENDB2:last toke:{rag[eo-1]}")
         else: raise ValueError("overlap != 1 has not been implemented")
 
         return ei,eo
