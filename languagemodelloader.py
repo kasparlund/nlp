@@ -4,7 +4,7 @@ class BatchLayout(IntEnum):
     Parallel   = 1
     Sequential = 2
     
-class MyLanguageModelLoader():
+class MyLanguageModelPreLoader(Callback):
     "Create a dataloader with bptt slightly changing."
     
     class CircularIndex():
@@ -20,54 +20,49 @@ class MyLanguageModelLoader():
         def shuffle(self): np.random.shuffle(self.idx)
         def forward(self, forward:bool=True): self.forward_ = forward
 
-    def __init__(self, dataset:LabelList, bs:int=64, bptt:int=70, backwards:bool=False, shuffle:bool=False,
-                 p_bptt:int=0.0, bl:BatchLayout=BatchLayout.Parallel, log=False):
-        self.init_kwargs = dict(bs=bs, bptt=bptt, backwards=backwards, shuffle=shuffle)
-        self.dataset,self.bs,self.bptt,self.p_bptt,self.shuffle,self.backwards = dataset,bs,bptt,p_bptt,shuffle,backwards
-        
-        nToks = 0
-        for i,s in enumerate(dataset.x.items): nToks += len(s)
-        self.totalToks   = nToks    
-        self.ite_len     = math.ceil( nToks / (self.bs*self.bptt) )
-        self.idx         = None
-        self.npStorage   = None
-        self.bl          = bl        
-        self.first       = True
-        self.num_workers = 0 # how is num_workers used here ?
-        self.log         = log
+    def __init__(self, dataset:LabelList, bs:int=32, bptt:int=70, backwards:bool=False, shuffle:bool=False,
+                 drop_last:bool=False, bl:BatchLayout=BatchLayout.Parallel, log=False):
+        self.dataset,self.bs,self.bptt,self.backwards = dataset,bs,bptt,backwards
+        self.shuffle,self.drop_last = shuffle,drop_last
+        self.totalToks = 0
+        for rag in dataset.x.items: self.totalToks += len(rag)
+        self.ite_len   = int( math.ceil((self.totalToks-1) / self.bptt) )  if self.item is None else 1
+        self.npStorage,self.idx, self.bl, self.log = None,None, bl, log
+        if self.log: print(f"__init__ bs:{self.bs} self.ite_len:{self.ite_len} self.totalToks:{self.totalToks}")
 
-    def __len__(self) -> int: return self.ite_len
-
+    def __len__(self): return self.ite_len if self.item is None else 1
+    def __getattr__(self,k:str)->Any: return getattr(self.dataset, k)
+   
     def allocate_buffers(self):     
         "allocate the required worth-case batchbuffer"
-        self.idx = MyLanguageModelLoader.CircularIndex(len(self.dataset.x.items), not self.backwards)        
-
-        #The batches vary uniformly around bppt in the interval bppt + p_bptt*bppt
-        max_batch_element = int( self.bs * (1 + math.ceil( self.bptt*(1+0.5*self.p_bptt) ) ) )
-        self.npStorage    = np.zeros(max_batch_element, dtype=np.int64)
-        
-        if self.bl == BatchLayout.Parallel:
-            self.ei = np.zeros(self.bs, dtype=np.int)
-            self.eo = np.zeros(self.bs, dtype=np.int)
+        #items:   the ragged/jagged array 
+        #idx:     used to index into items so that shuffle is used - if idx has been shuffled 
+        #row:     a row in the batch to be filled with consequetive tokens
+        #ei:      index of the first rag to be extract. Returs as index to the next rag to be extracted
+        #eo:      index to the first token to be extracted in the first rag. Returs pointing to the next to be extract in the last rag
+        #         when iterating backwards then ei becomes 1+ the last token to be extraced in the rag 
+        #overlap: overlap=1 between batches, because we only predict the next token        
+        self.idx   = MyLanguageModelPreLoader.CircularIndex(len(self.dataset.x.items), not self.backwards)
+        self.batch = np.zeros( (self.bs, self.bptt+1), dtype=np.int64)
+        self.x, self.y = self.batch[:,0:self.bptt], self.batch[:,1:self.bptt+1]      
+        self.ei    = np.zeros(self.bs, dtype=np.int) if self.bl == BatchLayout.Parallel else 0
+        self.eo    = np.zeros(self.bs, dtype=np.int) if self.bl == BatchLayout.Parallel else 0        
 
     def print_ei_eo(self, title:str):
-        #usefull for verification that each row uses all its data
         lns = np.zeros_like(self.ei, dtype=np.int)
         for i,ei in enumerate(self.ei):lns[i] = len(self.dataset.x.items[self.idx[ei]])
         print(title)
         print( pd.DataFrame(data=np.stack([self.ei,self.eo,lns],axis=0).T,columns=["ei","eo","length"]) )
-    import pdb
-    def __iter__(self):
-        if getattr(self.dataset, 'item', None) is not None: 
-            yield LongTensor(getattr(self.dataset, 'item'))[None],LongTensor([0])
-
-        #allocate buffers lazily in order to avoid vasting memory on fix_ds which is not always or never for ULMFit
+    
+    def on_epoch_begin(self, **kwargs):
+        #print(f"MyLanguageModelPreLoader.on_epoch_begin bs:{self.bs} len(self):{len(self)} shuffle:{self.shuffle}")
         if self.idx is None: self.allocate_buffers()
         if self.shuffle:     self.idx.shuffle()
         self.idx.forward(self.backwards is False) 
 
         if self.bl == BatchLayout.Parallel:
-            step = self.totalToks / self.bs
+            #set up ei and eo to index the data so batches has continuous rows  
+            step   = self.totalToks / self.bs
             ln_rag = countTokens = 0
             i_rag  = -1
             if self.log: print(f"step:{step}")
@@ -76,109 +71,73 @@ class MyLanguageModelLoader():
                     countTokens += ln_rag
                     i_rag       += 1
                     ln_rag       = len( self.dataset.x.items[self.idx[i_rag]] )
-
                 self.ei[i] = i_rag
                 self.eo[i] = ( ln_rag - int(step * i - countTokens) ) if self.backwards else int(step * i - countTokens)
 
-                if self.log : print(f"i_rag:{i_rag} ln_rag:{ln_rag} int(step * i):{int(step * i)} countTokens:{countTokens} "+\
-                                f"self.eo[i]:{self.eo[i]}")    
-            #self.print_ei_eo("start of epoch")
+                if self.log: 
+                    print(f"i_rag:{i_rag} ln_rag:{ln_rag} int(step * i):{int(step * i)} countTokens:{countTokens} self.eo[i]:{self.eo[i]}")    
+                    self.print_ei_eo("start of epoch")
         else:
             self.ei,self.eo = 0,0
 
-        i = 0
-        overlap=1
-        while i < self.ite_len: 
-            #load max batch first, in order to reduce fragmentation i pytorch/GPU!
-            if self.first and i == 0: self.first,seq_len = False, int(self.npStorage.size/self.bs - 1)
-            else:                     seq_len = int( math.ceil(self.bptt*(1. + self.p_bptt*(np.random.random() - 0.5))) )
-            nToks = self.bs*(seq_len+1)
+    #Training dl gets on_epoch_begin called, val_dl, on_epoch_end
+    def on_epoch_end(self, **kwargs): self.on_epoch_begin()
 
-            if self.bl == BatchLayout.Parallel:
-                batchView = self.npStorage[:nToks].reshape(self.bs,-1)
-                self.parallel_fill(self.dataset.x.items, self.idx, batchView, self.ei, self.eo, overlap, self.backwards)
-            else:    
-                batchView = self.npStorage[:nToks]
-                if  backwards:self.ei, self.eo = self.fill_row_backwards(self.dataset.x.items,self.idx, batchView,\
-                                                               self.ei, self.eo, overlap)
-                else:         self.ei, self.eo = self.fill_row(self.dataset.x.items, self.idx, batchView,\
-                                                               self.ei, self.eo, overlap)
-                batchView = batchView.reshape(self.bs,-1)
+    def __getitem__(self, k:int):
+        if self.item is not None: return self.dataset[0]
+        if self.idx is None:      self.on_epoch_begin()
 
-            i += 1
-            yield torch.from_numpy(batchView[:,0:seq_len]), torch.from_numpy(batchView[:,1:seq_len+1])
-        #self.print_ei_eo("end of epoch")
+        j = k % self.bs
+
+        if self.bl == BatchLayout.Parallel:
+            if self.backwards: 
+                self.ei[j],self.eo[j] = self.fill_backward( self.dataset.x.items, self.idx, self.batch[j], 
+                                                            self.ei[j], self.eo[j], overlap=1, rowid=j )
+            else:         
+                self.ei[j],self.eo[j] = self.fill_forward(  self.dataset.x.items, self.idx, self.batch[j], 
+                                                            self.ei[j], self.eo[j], overlap=1, rowid=j )
+        else:    
+            if self.backwards: 
+                self.ei, self.eo = self.fill_backward(      self.dataset.x.items, self.idx, self.batch.flatten(), 
+                                                            self.ei, self.eo, overlap=1, rowid=j )
+            else:              
+                self.ei, self.eo = self.row_fill(           self.dataset.x.items, self.idx, self.batch.flatten(),
+                                                            self.ei, self.eo, overlap=1, rowid=j )
+
+        #return self.batch[j,0:self.bptt], self.batch[j,1:self.bptt+1]
+        return self.x[j], self.y[j]
 
     def fill_forward(self, items, idx, row, ei, eo, overlap,rowid):
         "fill the row with tokens reading forwards from the ragged array"
-        #items:   the ragged/jagged array 
-        #idx:     used to index into items so that shuffle is used - if idx has been shuffled 
-        #row:     a row in teh batch to be filled with consequetive tokens
-        #ei:      index of the first rag to be extract. Returs as index to the next rag to be extracted
-        #eo:      index to the first token to be extracted in the first rag. Returs pointing to the next to be extract in the last rag
-        #overlap: overlap=1 between batches, because we only predict the next token
-        bi,bo = ei,eo
-        #print(f"BEGIN:rowid:{rowid} ei:{ei} eo:{eo} row.size:{row.size} bi:{bi} bo:{bo}" )
         ibuf = 0
         ei  -= 1 
         while ibuf < row.size:  
             ei   += 1 
             rag   = items[idx[ei]]
-            #if ibuf==0: print( f"BEGIN: ei:{ei} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} bi:{bi} bo:{bo} first toke:{rag[eo]}" )
             eo    = eo if ibuf==0 else 0
             n     = min(len(rag) - eo, row.size - ibuf)
-            #print( f"ITE:  ei:{ei} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo+n-1]}" )
             row[ibuf:ibuf+n] = rag[eo:eo+n]
             ibuf += n
-        if overlap == 1:  
-            eo += n-overlap
-            #print(f"ENDB:ei:ei:{ei} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo]}" )
+        if overlap == 1:  eo += n-overlap
         else: raise ValueError("overlap != 1 has not been implemented")
 
         return ei,eo
 
     def fill_backward(self, items, idx, row, ei, eo, overlap,rowid):
         "fill the row with tokens reading backwards from the ragged array"
-        bi,bo = ei,eo
         ibuf = 0
         ei  -= 1 
         while ibuf < row.size:  
             ei   += 1 
-            i     = idx[ei]
             rag   = items[idx[ei]]
-            #if ibuf==0: print( f"BEGIN:ei:{ei} i:{i} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} bi:{bi} bo:{bo} first toke:{rag[eo-1]}" )
             eo    = eo if ibuf==0 else len(rag)
             n     = min(eo, row.size - ibuf) 
-            #print( f"ITE:  ei:{ei} i:{i} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} last toke:{rag[eo-n-1]}" )
             row[ibuf:ibuf+n] = rag[eo-n:eo][::-1]
             ibuf += n
-        if overlap == 1:  
-            eo -= n-overlap
-            #print(f"2 ENDB:ei:{ei} i:{i} eo:{eo} len(rag):{len(rag)} row.size:{row.size} ibuf:{ibuf} n:{n} bi:{bi} bo:{bo} ENDB2:last toke:{rag[eo-1]}")
+        if overlap == 1: eo -= n-overlap
         else: raise ValueError("overlap != 1 has not been implemented")
 
         return ei,eo
-
-    def row_fill(self, items, idx, batch, ei, eo, overlap, backwards):
-        if backwards:self.ei, self.eo = self.fill_forward( self.dataset.x.items, self.idx, batchView, self.ei, self.eo, overlap)
-        else:        self.ei, self.eo = self.fill_backward(self.dataset.x.items, self.idx, batchView, self.ei, self.eo, overlap)
-
-    def parallel_fill(self, items, idx, batch, ei, eo, overlap, backwards):
-        "data, ei, eo are passed by ref so updating then here updates the arrays in caller"
-        if backwards: 
-            for j in range(len(batch)): ei[j],eo[j] = self.fill_backward( items, idx, batch[j], ei[j], eo[j], overlap, j )
-        else:         
-            for j in range(len(batch)): ei[j],eo[j] = self.fill_forward(  items, idx, batch[j], ei[j], eo[j], overlap, j )
-
-    def __getattr__(self,k:str)->Any: return getattr(self.dataset, k)
-
-    @property
-    def batch_size(self): return self.bs
-    @batch_size.setter
-    def batch_size(self, v): self.bs = v
-
-    def batchify(self, data:np.ndarray) -> LongTensor: pass
-
 
 #this class is only to ensure that MyLanguageModelLoader gets loaded instead of LanguageModelLoader
 class MyTextLMDataBunch(TextLMDataBunch):
@@ -191,19 +150,22 @@ class MyTextLMDataBunch(TextLMDataBunch):
         "Create a `TextDataBunch` from ids, labels and a `vocab`."
         src = ItemLists(path, TextList(train_ids, vocab, path=path, processor=[]),
                         TextList(valid_ids, vocab, path=path, processor=[]))
-        src = src.label_for_lm() if cls==TextLMDataBunch else src.label_from_lists(train_lbls, valid_lbls, classes=classes, processor=[])
+        src = src.label_for_lm() if cls==MyTextLMDataBunch else src.label_from_lists(train_lbls, valid_lbls, classes=classes, processor=[])
         if test_ids is not None: src.add_test(TextList(test_ids, vocab, path=path), label=train_lbls[0])
         src.valid.x.processor = ifnone(processor, [TokenizeProcessor(), NumericalizeProcessor(vocab=vocab)])
-        
         src.train.x._bunch = MyTextLMDataBunch
         src.valid.x._bunch = MyTextLMDataBunch
-        src.test.x._bunch  = MyTextLMDataBunch
+        if src.test is not None: src.test.x._bunch  = MyTextLMDataBunch
         return src.databunch(**kwargs)
 
     #need customized version of this in order to set MyLanguageModelLoader
     @classmethod
-    def create(cls, train_ds, valid_ds, test_ds=None, path:PathOrStr='.', no_check:bool=False, **kwargs) -> DataBunch:
+    def create(cls, train_ds, valid_ds, test_ds=None, path:PathOrStr='.', no_check:bool=False, bs=64, num_workers:int=0,
+               device:torch.device=None, collate_fn:Callable=data_collate, tfms:Optional[Collection[Callable]]=None, 
+               **kwargs) -> DataBunch:
         "Create a `TextDataBunch` in `path` from the `datasets` for language modelling."
         datasets = cls._init_ds(train_ds, valid_ds, test_ds)
-        dataloaders = [MyLanguageModelLoader(ds, shuffle=(i==0), **kwargs) for i,ds in enumerate(datasets)]
-        return cls(*dataloaders, path=path, no_check=no_check)
+        datasets = [MyLanguageModelPreLoader(ds, shuffle=(i==0), drop_last=(i==0), bs=bs, **kwargs) for i,ds in enumerate(datasets)]
+        val_bs = bs
+        dls = [DataLoader(d, b, shuffle=False) for d,b in zip(datasets, (bs,val_bs,val_bs,val_bs)) if d is not None]
+        return cls(*dls, path=path, device=device, tfms=tfms, collate_fn=collate_fn, no_check=no_check)
