@@ -22,15 +22,14 @@ class MyLanguageModelPreLoader(Callback):
 
     def __init__(self, dataset:LabelList, bs:int=32, bptt:int=70, backwards:bool=False, shuffle:bool=False,
                  drop_last:bool=False, bl:BatchLayout=BatchLayout.Parallel, log=False):
-        self.dataset,self.bs,self.bptt,self.backwards = dataset,bs,bptt,backwards
-        self.shuffle,self.drop_last = shuffle,drop_last
+        self.dataset,self.bs,self.bptt,self.shuffle,self.backwards = dataset,bs,bptt,shuffle,backwards
         self.totalToks = 0
         for rag in dataset.x.items: self.totalToks += len(rag)
-        self.ite_len   = int( math.ceil((self.totalToks-1) / self.bptt) )  if self.item is None else 1
+        self.ite_len   = self.bs*int( math.ceil( self.totalToks/(self.bptt*self.bs) )) if self.item is None else 1
         self.npStorage,self.idx, self.bl, self.log = None,None, bl, log
-        if self.log: print(f"__init__ bs:{self.bs} self.ite_len:{self.ite_len} self.totalToks:{self.totalToks}")
+        if self.log:print(f"MyLanguageModelPreLoader.__init__ totalToks:{self.totalToks} ite_len:{self.ite_len} bs:{self.bs} bptt:{self.bptt}")
 
-    def __len__(self): return self.ite_len if self.item is None else 1
+    def __len__(self): return self.ite_len
     def __getattr__(self,k:str)->Any: return getattr(self.dataset, k)
    
     def allocate_buffers(self):     
@@ -79,9 +78,10 @@ class MyLanguageModelPreLoader(Callback):
                     self.print_ei_eo("start of epoch")
         else:
             self.ei,self.eo = 0,0
-
+        self.countToks=0
     #Training dl gets on_epoch_begin called, val_dl, on_epoch_end
-    def on_epoch_end(self, **kwargs): self.on_epoch_begin()
+    def on_epoch_end(self, **kwargs): 
+        self.on_epoch_begin()
 
     def __getitem__(self, k:int):
         if self.item is not None: return self.dataset[0]
@@ -103,7 +103,7 @@ class MyLanguageModelPreLoader(Callback):
             else:              
                 self.ei, self.eo = self.row_fill(           self.dataset.x.items, self.idx, self.batch.flatten(),
                                                             self.ei, self.eo, overlap=1, rowid=j )
-
+        self.countToks += self.bptt
         #return self.batch[j,0:self.bptt], self.batch[j,1:self.bptt+1]
         return self.x[j], self.y[j]
 

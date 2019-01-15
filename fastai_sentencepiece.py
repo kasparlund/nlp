@@ -6,15 +6,13 @@ import shutil
  
 import sentencepiece as spm
 
-def rm_extra_lineshift(t:str) -> str:
-    return re.sub('[\r\n]+', '\n', t)
-def extract_link_title(t:str) -> str:
-    return re.sub('\[\[(?:[^\]\[:]+\|)|([^\]\[:]+)\]\]', '\g<1>', t).replace('[','')
+def rm_extra_lineshift(t:str) -> str: return re.sub('[\r\n]+', '\n', t)
+spm_rules = [fix_html, replace_rep, replace_wrep, spec_add_spaces, rm_useless_spaces, replace_all_caps, deal_caps, rm_extra_lineshift]
+#def extract_link_title(t:str) -> str: return re.sub('\[\[(?:[^\]\[:]+\|)|([^\]\[:]+)\]\]', '\g<1>', t).replace('[','')
 #def remove_first_empty_lines(t:str) -> str:  return re.sub('^\n', '', t)
 class SentencepieceWikiModel:
     def __init__(self, lang:str, pathJson:Path, pathcsv:Path, pathTxt:Path, pathVocab:Path, minWords, 
-                 vocab_size:int=32000, model_type:str='unigram', 
-                 rules=text.transform.defaults.text_pre_rules, chunksize=int(4e7) ):  #should include removal of repetitions
+                 vocab_size:int=32000, model_type:str='unigram', rules=spm_rules, chunksize=int(4e7) ):  #should include removal of repetitions
         self.lang           = lang
         self.pathJson       = pathJson
         self.pathVocab      = pathVocab
@@ -23,7 +21,7 @@ class SentencepieceWikiModel:
         self.vocab_size     = vocab_size
         self.model_type     = model_type
         self.rules          = rules
-        self.rules.append(rm_extra_lineshift)
+        #self.rules.append(rm_extra_lineshift)
         #self.rules.append(extract_link_title)
         self.minWords       = minWords
         self.chunksize      = chunksize
@@ -105,6 +103,8 @@ class SentencepieceWikiModel:
         pathSrc_list= ",".join(pathSrc_list)
         #we enble all control symbols so that the tokenizations cleans the input text
         #but we also create them as userdefined symbols in order to allocate and id for each
+        #          f"--max_sentence_length=4192 " \  
+        #          f"--hard_vocab_limit=False " \
         sp_params = f"--input={pathSrc_list} "  \
                     f"--num_threads={defaults.cpus} " \
                     f"--unk_piece={text.transform.UNK} " \
@@ -120,7 +120,6 @@ class SentencepieceWikiModel:
                     f"--vocab_size={self.vocab_size} " \
                     f"--model_type={self.model_type} " 
     
-        #hard_vocab_limit=False
         return sp_params, model_prefix
 
     def trainVocabulary(self) : 

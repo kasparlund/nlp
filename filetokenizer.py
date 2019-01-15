@@ -1,5 +1,3 @@
-from fastai import * 
-from fastai.basics import * 
 from fastai.text import * 
 import sentencepiece as spm
 from multiprocessing import Pool
@@ -9,26 +7,26 @@ import fastai.text.transform
 from fastai_sentencepiece import *
 
 class FileTokenizer():
+
     "Put together rules and a tokenizer function to tokenize text with multiprocessing."
     def __init__(self, tokPath:Path, tok_func:Callable, lang:str, vocab:fastai.text.transform.Vocab, 
                  special_cases:Collection[str]=None, n_cpus:int=None, minToks:int=5):
-        self.tok_func,self.lang,self.special_cases = tok_func,lang,special_cases
-        self.pre_rules  = text.transform.defaults.text_pre_rules.copy()
-        self.pre_rules.append(rm_extra_lineshift)
-        self.post_rules = text.transform.defaults.text_post_rules
+        self.tok_func,self.lang = tok_func,lang
+        self.pre_rules  = spm_rules# text.transform.defaults.text_pre_rules.copy()
+        #self.pre_rules.append(rm_extra_lineshift)
+        self.post_rules = [] #text.transform.defaults.text_post_rules
         self.special_cases = special_cases if special_cases else defaults.text_spec_tok
-        self.n_cpus = ifnone(n_cpus, defaults.cpus)
-        self.vocab  = vocab
+        self.n_cpus  = ifnone(n_cpus, defaults.cpus)
+        self.vocab   = vocab
         self.minToks = minToks
         self.tokPath = tokPath
-        
-        self.count=0
-        self.dtype =  np.int16 if len(self.vocab.itos) < pow(2,15)-1 else np.int32  #should test whether we can use uint16
+        self.count   = 0
+        self.dtype   = np.uint16 if len(self.vocab.itos) < pow(2,16)-1 else np.int32
         print(f"self.dtype:{self.dtype}")
 
     def __repr__(self) -> str:
         res = f'Tokenizer {self.tok_func.__name__} in {self.lang} with the following rules:\n'
-        for rule in self.pre_rules: res += f' - {rule.__name__}\n'
+        for rule in self.pre_rules: res  += f' - {rule.__name__}\n'
         for rule in self.post_rules: res += f' - {rule.__name__}\n'
         return res
 
@@ -43,7 +41,7 @@ class FileTokenizer():
 
         pathIds = self.tokPath/(inPath.stem+"-ids.npy")
         pathIds.parent.mkdir(parents=True,exist_ok=True)
-        arrays = []
+        arrays  = []
         with inPath.open("r", encoding='utf-8') as f:
             for line in f:
                 for rule in self.pre_rules: line = rule(line)
@@ -56,8 +54,7 @@ class FileTokenizer():
         
         if len(arrays)>0:
             with pathIds.open("wb") as f:
-                np.save(f, np.asarray(arrays), allow_pickle=True, fix_imports=False)
-                
+                np.save(f, np.asarray(arrays), allow_pickle=True, fix_imports=False)           
         return t
  
     def _process_all_1(self, texts:Collection[str]) -> List[List[str]]:
