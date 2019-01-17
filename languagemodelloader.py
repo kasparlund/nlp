@@ -27,7 +27,8 @@ class MyLanguageModelPreLoader(Callback):
         for rag in dataset.x.items: self.totalToks += len(rag)
         self.ite_len   = self.bs*int( math.ceil( self.totalToks/(self.bptt*self.bs) )) if self.item is None else 1
         self.npStorage,self.idx, self.bl, self.log = None,None, bl, log
-        if self.log:print(f"MyLanguageModelPreLoader.__init__ totalToks:{self.totalToks} ite_len:{self.ite_len} bs:{self.bs} bptt:{self.bptt}")
+        #if self.log:
+        print(f"MyLanguageModelPreLoader.__init__ totalToks:{self.totalToks} ite_len:{self.ite_len} bs:{self.bs} bptt:{self.bptt}")
 
     def __len__(self): return self.ite_len
     def __getattr__(self,k:str)->Any: return getattr(self.dataset, k)
