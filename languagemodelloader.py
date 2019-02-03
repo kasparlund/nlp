@@ -27,8 +27,8 @@ class MyLanguageModelPreLoader(Callback):
         for rag in dataset.x.items: self.totalToks += len(rag)
         self.ite_len   = self.bs*int( math.ceil( self.totalToks/(self.bptt*self.bs) )) if self.item is None else 1
         self.npStorage,self.idx, self.bl, self.log = None,None, bl, log
-        #if self.log:
-        print(f"MyLanguageModelPreLoader.__init__ totalToks:{self.totalToks} ite_len:{self.ite_len} bs:{self.bs} bptt:{self.bptt}")
+        if self.log:
+            print(f"MyLanguageModelPreLoader.__init__ totalToks:{self.totalToks} ite_len:{self.ite_len} bs:{self.bs} bptt:{self.bptt}")
 
     def __len__(self): return self.ite_len
     def __getattr__(self,k:str)->Any: return getattr(self.dataset, k)
@@ -46,13 +46,13 @@ class MyLanguageModelPreLoader(Callback):
         self.batch = np.zeros( (self.bs, self.bptt+1), dtype=np.int64)
         self.x, self.y = self.batch[:,0:self.bptt], self.batch[:,1:self.bptt+1]      
         self.ei    = np.zeros(self.bs, dtype=np.int) if self.bl == BatchLayout.Parallel else 0
-        self.eo    = np.zeros(self.bs, dtype=np.int) if self.bl == BatchLayout.Parallel else 0        
+        self.eo    = np.zeros(self.bs, dtype=np.int) if self.bl == BatchLayout.Parallel else 0
 
-    def print_ei_eo(self, title:str):
-        lns = np.zeros_like(self.ei, dtype=np.int)
-        for i,ei in enumerate(self.ei):lns[i] = len(self.dataset.x.items[self.idx[ei]])
+    def print_ro_ri(self, title:str):
+        lns = np.zeros_like(self.ro, dtype=np.int)
+        for i,ro in enumerate(self.ro):lns[i] = len(self.dataset.x.items[self.idx[ro]])
         print(title)
-        print( pd.DataFrame(data=np.stack([self.ei,self.eo,lns],axis=0).T,columns=["ei","eo","length"]) )
+        print( pd.DataFrame(data=np.stack([self.ro,self.ri,lns],axis=0).T,columns=["ro","ri","length"]) )
     
     def on_epoch_begin(self, **kwargs):
         #print(f"MyLanguageModelPreLoader.on_epoch_begin bs:{self.bs} len(self):{len(self)} shuffle:{self.shuffle}")
@@ -80,65 +80,90 @@ class MyLanguageModelPreLoader(Callback):
         else:
             self.ei,self.eo = 0,0
         self.countToks=0
+        #self.countAll = []
+
     #Training dl gets on_epoch_begin called, val_dl, on_epoch_end
     def on_epoch_end(self, **kwargs): 
+        """
+        self.countAll = np.asarray(self.countAll,dtype=np.int)
+        median  = np.median(self.countAll)
+        pMedian = 100*np.sum(self.countAll==median)/len(self.countAll)
+        print(f"countAll min:{min(self.countAll)} max:{np.max(self.countAll)} - median:{median} median%:{pMedian}")
+
+        percent     = np.asarray([ 25,50,75,100]) # %np.arange(101,dtype=np.int)
+        percentiles = np.percentile(self.countAll,percent).astype(np.int)
+        print(f"Total loops:{len(self.countAll)} percentiles:")
+        for i in range(len(percent)):print(f"{percent[i]}  {percentiles[i]}")
+        print(np.sort(self.countAll) )        
+        """
         self.on_epoch_begin()
 
     def __getitem__(self, k:int):
-        if self.item is not None: return self.dataset[0]
-        if self.idx is None:      self.on_epoch_begin()
-
         j = k % self.bs
-
-        if self.bl == BatchLayout.Parallel:
-            if self.backwards: 
-                self.ei[j],self.eo[j] = self.fill_backward( self.dataset.x.items, self.idx, self.batch[j], 
-                                                            self.ei[j], self.eo[j], overlap=1, rowid=j )
-            else:         
-                self.ei[j],self.eo[j] = self.fill_forward(  self.dataset.x.items, self.idx, self.batch[j], 
-                                                            self.ei[j], self.eo[j], overlap=1, rowid=j )
-        else:    
-            if self.backwards: 
-                self.ei, self.eo = self.fill_backward(      self.dataset.x.items, self.idx, self.batch.flatten(), 
-                                                            self.ei, self.eo, overlap=1, rowid=j )
-            else:              
-                self.ei, self.eo = self.row_fill(           self.dataset.x.items, self.idx, self.batch.flatten(),
-                                                            self.ei, self.eo, overlap=1, rowid=j )
-        self.countToks += self.bptt
-        #return self.batch[j,0:self.bptt], self.batch[j,1:self.bptt+1]
+        if j==0:
+            if self.item is not None: return self.dataset[0]
+            if self.idx is None: self.on_epoch_begin()
+            self.fill_batch(not self.backwards, self.dataset.x.items, self.idx,self.batch, self.ro, self.ri, 
+                            overlap=1, lengths=self.lengths)
         return self.x[j], self.y[j]
 
-    def fill_forward(self, items, idx, row, ei, eo, overlap,rowid):
+    def fill_forward(self, items, idx, row, ro, ri, overlap):
+        "fill the row with tokens reading forward in the ragged array. --OBS-- overlap != 1 has not been implemented"
+        ibuf = n = 0 
+        ro  -= 1
+        while ibuf < row.size:  
+            ro   += 1 
+            rag   = items[idx[ro]]
+            ri    = 0 if ibuf else ri
+            n     = min(len(rag) - ri, row.size - ibuf)
+            row[ibuf:ibuf+n] = rag[ri:ri+n]
+            ibuf += n
+        return ro, ri + n-overlap
+
+    def fill_backwards(self, items, idx, row, ro, ri, overlap):
+        "fill the row with tokens reading backwards in the ragged array. --OBS-- overlap != 1 has not been implemented"
+        ibuf = n = 0 
+        ro  -= 1
+        while ibuf < row.size:  
+            ro   += 1 
+            rag   = items[idx[ro]]
+            ri    = len(rag) if ibuf else ri
+            n     = min(ri, row.size - ibuf) 
+            row[ibuf:ibuf+n] = rag[ri-n:ri][::-1]
+            ibuf += n
+        return ro, ri - n+overlap
+
+    def fill_batch(self, forward, items, idx, batch, ro, ri, overlap):
+        if forward:
+            for j,row in enumerate(batch): ro[j],ri[j] = self.fill_forward(items,  idx, row, ro[j], ri[j], overlap)
+        else:
+            for j,row in enumerate(batch): ro[j],ri[j] = self.fill_backwards(items, idx, row, ro[j], ri[j], overlap)
+
+    def fill(self, forward, items, idx, row, ei, eo, overlap, rowid):
         "fill the row with tokens reading forwards from the ragged array"
+        count= 0
         ibuf = 0
-        ei  -= 1 
+        ei  -= 1
+        n    = 0
         while ibuf < row.size:  
+            count+= 1
             ei   += 1 
             rag   = items[idx[ei]]
-            eo    = eo if ibuf==0 else 0
-            n     = min(len(rag) - eo, row.size - ibuf)
-            row[ibuf:ibuf+n] = rag[eo:eo+n]
+
+            if forward:
+                eo = eo if ibuf==0 else 0
+                n  = min(len(rag) - eo, row.size - ibuf)
+                row[ibuf:ibuf+n] = rag[eo:eo+n]
+            else:    
+                eo = eo if ibuf==0 else len(rag)
+                n  = min(eo, row.size - ibuf) 
+                row[ibuf:ibuf+n] = rag[eo-n:eo][::-1]
             ibuf += n
-        if overlap == 1:  eo += n-overlap
+
+        if overlap == 1:  eo += n-overlap if forward else -(n-overlap)
         else: raise ValueError("overlap != 1 has not been implemented")
 
-        return ei,eo
-
-    def fill_backward(self, items, idx, row, ei, eo, overlap,rowid):
-        "fill the row with tokens reading backwards from the ragged array"
-        ibuf = 0
-        ei  -= 1 
-        while ibuf < row.size:  
-            ei   += 1 
-            rag   = items[idx[ei]]
-            eo    = eo if ibuf==0 else len(rag)
-            n     = min(eo, row.size - ibuf) 
-            row[ibuf:ibuf+n] = rag[eo-n:eo][::-1]
-            ibuf += n
-        if overlap == 1: eo -= n-overlap
-        else: raise ValueError("overlap != 1 has not been implemented")
-
-        return ei,eo
+        return ei,eo,count
 
 #this class is only to ensure that MyLanguageModelLoader gets loaded instead of LanguageModelLoader
 class MyTextLMDataBunch(TextLMDataBunch):
