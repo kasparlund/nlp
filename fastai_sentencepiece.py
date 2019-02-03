@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 from fastai.text import * 
 from pathlib import *
 from functools import partial
@@ -196,7 +197,7 @@ class SentencepieceWikiVocab:
         sp_params = f"--input={pathSrc_list} "  \
                     f"--shuffle_input_sentence=true " \
                     f"--input_sentence_size={int(1.8e6)} " \
-                    f"--max_sentence_length=4192 " \
+                    f"--max_sentence_length=4096 " \
                     f"--unk_id=0 " \
                     f"--bos_id=1 " \
                     f"--eos_id=2 " \

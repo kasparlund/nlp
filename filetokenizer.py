@@ -3,25 +3,17 @@ import sentencepiece as spm
 from multiprocessing import Pool
 from multiprocessing.dummy import Pool as ThreadPool 
 import fastai.text.transform
-
 from fastai_sentencepiece import *
 
-class FileTokenizer():
-
+class SPFileTokenizer():
     "Put together rules and a tokenizer function to tokenize text with multiprocessing."
-    def __init__(self, tokPath:Path, tok_func:Callable, lang:str, vocab:fastai.text.transform.Vocab, 
-                 special_cases:Collection[str]=None, n_cpus:int=None, minToks:int=5):
+    def __init__(self, tokPath:Path, tok_func:Callable, lang:str, vocab:fastai.text.transform.Vocab, n_cpus:int=None):
         self.tok_func,self.lang = tok_func,lang
-        self.special_cases = special_cases if special_cases else defaults.text_spec_tok
         self.n_cpus  = ifnone(n_cpus, defaults.cpus)
         self.vocab   = vocab
-        self.minToks = minToks
         self.tokPath = tokPath
         self.count   = 0
         self.dtype   = np.uint16 if len(self.vocab.itos) < pow(2,16)-1 else np.int32
-        if self.special_cases: 
-            tok = self.tok_func(self.lang)
-            tok.add_special_cases(self.special_cases)
 
     def __repr__(self) -> str:
         res = f'{self.__name__} using {self.tok_func}:\n'
@@ -41,8 +33,7 @@ class FileTokenizer():
             for line in f:
                 toks = tok.tokenizer(line)
                 ids  = self.vocab.numericalize(toks) 
-                
-                if len(toks) < self.minToks: continue
+                #if len(toks) < self.minToks: continue
                 arrays.append( np.asarray(ids, dtype=self.dtype) )
         
         if len(arrays)>0:
@@ -60,20 +51,26 @@ class FileTokenizer():
     def process_all(self, texts:Collection[str]) -> List[List[str]]:
         "Process a list of `texts`."
         if self.n_cpus <= 1: return self._process_all_1(texts)
-        print(f"FileTokenizer.process_all files:{len(texts)} on n_cpus:{self.n_cpus} and minToks:{self.minToks}")
+        print(f"FileTokenizer.process_all files:{len(texts)} on n_cpus:{self.n_cpus}")
         with ProcessPoolExecutor(self.n_cpus) as e:
             return sum(e.map(self._process_all_1, partition_by_cores(texts, self.n_cpus)), [])
         
-    def getIds(self):
+    def getIds(self, minToks=0, maxToks=-1, maxUnks=-1, unk_idx=0):
         files = list(self.tokPath.glob("*-ids.npy"))
         idArrays=[]
         for fp in files:
             with fp.open("rb") as f:
                 a = np.load(f)
-                if len(a) > 0: idArrays.extend( a )
-        return idArrays 
+                if not (minToks==0 or maxToks==-1 or maxUnks==-1) and len(a) > 0:
+                    for i,rag in enumerate(a):
+                        ln    = len(rag)
+                        nUnks = np.sum(rag==unk_idx)
+                        if minToks<=ln and ln<=maxToks and nUnks <= maxUnks:
+                            idArrays.append(rag)
+                elif len(a) > 0: idArrays.extend( a )
+        return np.asarray(idArrays)
         
-class FileTokenizeProcessor(PreProcessor):
+class SPFileTokenizeProcessor(PreProcessor):
     "`PreProcessor` that tokenizes the texts in `ds`."
     def __init__(self, ds:ItemList=None, tokenizer:Tokenizer=None, chunksize:int=10000, mark_fields:bool=False):
         self.tokenizer,self.chunksize,self.mark_fields = ifnone(tokenizer, Tokenizer()),chunksize,mark_fields
