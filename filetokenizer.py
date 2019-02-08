@@ -55,9 +55,8 @@ class SPFileTokenizer():
         with ProcessPoolExecutor(self.n_cpus) as e:
             return sum(e.map(self._process_all_1, partition_by_cores(texts, self.n_cpus)), [])
         
-    def getIds(self, minToks=0, maxToks=-1, maxUnks=-1, unk_idx=0):
-        files = list(self.tokPath.glob("*-ids.npy"))
-        idArrays=[]
+    def getIds(self, minToks=0, maxToks=-1, maxUnks=-1, unk_idx=0,count=-1):
+        files, idArrays, tokCount = list(self.tokPath.glob("*-ids.npy")), [], 0
         for fp in files:
             with fp.open("rb") as f:
                 a = np.load(f)
@@ -65,8 +64,9 @@ class SPFileTokenizer():
                     for i,rag in enumerate(a):
                         ln    = len(rag)
                         nUnks = np.sum(rag==unk_idx)
-                        if minToks<=ln and ln<=maxToks and nUnks <= maxUnks:
+                        if minToks<=ln and ln<=maxToks and nUnks <= maxUnks and ( tokCount < count if count>-1 else True):
                             idArrays.append(rag)
+                            tokCount += len(rag)
                 elif len(a) > 0: idArrays.extend( a )
         return np.asarray(idArrays)
         

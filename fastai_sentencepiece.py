@@ -239,7 +239,8 @@ class SentencepieceTokenizer(BaseTokenizer):
 
         def textify(self, nums:Collection[int], sep=' ') -> List[str]:
             "Convert a list of `nums` to their tokens."
-            return self.spp.DecodeIds(nums.tolist())
+            if not isinstance(nums,list): nums = nums.tolist()
+            return self.spp.DecodeIds(nums)
 
     def __init__(self, lang:str, pathVocab:Path):
         self.lang       = lang

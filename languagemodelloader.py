@@ -15,9 +15,9 @@ class MyLanguageModelPreLoader(Callback):
             "shuffle CircularIndex indicies and new indices that points to the jagged arrays that ro pointed to indirectly"
             if ro is None: np.random.shuffle(self.idx)
             else:          
-                t0 = time.perf_counter()
-                log = False
-                if log:idx_cpy = self.idx.copy()
+                log     = False
+                t0      = time.perf_counter() if log else None
+                idx_cpy = self.idx.copy() if log else None
 
                 #get the location(ro_idx) of the data indices for ro and the data indices themself (rod)
                 ro_ix  = ro%len(self.idx) if self.forward else len(self.idx)-1-ro%len(self.idx)
@@ -53,7 +53,7 @@ class MyLanguageModelPreLoader(Callback):
                     #print("no shuffle")
                     #we do not shuffle when there is ties because ths only occure in tiny datasets such as testdata
                     ro_new = ro
-            return ro_new
+                return ro_new
 
     def __init__(self, dataset:LabelList, lengths:Collection[int]=None, bs:int=32, bptt:int=70, backwards:bool=False, 
                  shuffle:bool=False):
@@ -80,7 +80,7 @@ class MyLanguageModelPreLoader(Callback):
         #ri: index of the token we're at inside our current text for the various batches
         self.ri    = np.zeros(self.bs, dtype=np.int)
 
-        t0 = time.perf_counter()
+        #t0 = time.perf_counter()
         step = self.totalToks / self.bs
         ln_rag, countTokens, i_rag = 0, 0, -1
         for i in range(0,self.bs):
@@ -99,12 +99,7 @@ class MyLanguageModelPreLoader(Callback):
         #after the first epoch get the direct location of ro in the source data 
         #ro_from = None if self.idx is None else  [self.idx[i] for i in self.ro]
         if self.idx is None: self.allocate_buffers()
-        elif self.shuffle: 
-            ro_before = np.fromiter((self.idx[r] for r in self.ro), dtype=np.int, count=len(self.ro))
-            self.ro = self.idx.shuffle(self.ro)
-            ro_after  = np.fromiter((self.idx[r] for r in self.ro), dtype=np.int, count=len(self.ro))
-            assert ((ro_after-ro_before)==0).all(), f"\nfailed   :{(ro_after-ro_before)}\nro_after :{ro_after}\nro_before:{ro_before}"
-
+        elif self.shuffle: self.ro = self.idx.shuffle(self.ro)
         self.idx.forward = not self.backwards 
          
     #Training dl gets on_epoch_begin called, val_dl, on_epoch_end
