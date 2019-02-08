@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 from fastai.text import * 
 from pathlib import *
 from functools import partial
@@ -77,8 +76,8 @@ class SentencepieceWikiVocab:
         self.vocab_size     = vocab_size
         self.model_type     = model_type
 
-    def wikijson2TrainingData(self, rules=spm_rules, min_alpha=0.66, max_sep_pr_space=0.17, 
-                                    max_characters_pr_line=6000, min_words_pr_line=6, chunksize=int(4e7)):
+    def wikijson2TrainingData(self, rules=spm_rules, min_alpha=0.66, max_sep_pr_space=0.16, 
+                                    max_characters_pr_line=8000, min_words_pr_line=6, chunksize=int(4e7)):
         #Generate text files for training af sentencepiece vocabulary and a csv-file for training a languagemodel with the vocabulary"
         
         def save_sections( data, f_out, fileCount, header=False):
@@ -240,7 +239,7 @@ class SentencepieceTokenizer(BaseTokenizer):
 
         def textify(self, nums:Collection[int], sep=' ') -> List[str]:
             "Convert a list of `nums` to their tokens."
-            return spp.DecodeIds(nums)
+            return self.spp.DecodeIds(nums.tolist())
 
     def __init__(self, lang:str, pathVocab:Path):
         self.lang       = lang
