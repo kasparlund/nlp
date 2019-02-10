@@ -11,14 +11,10 @@ class MyLanguageModelPreLoader(Callback):
         def __init__(self, length:int, forward:bool): self.idx, self.forward = np.arange(length),forward
         def __getitem__(self, i): return self.idx[ i%len(self.idx) if self.forward else len(self.idx)-1-i%len(self.idx)]
         def __len__(self) -> int: return len(self.idx)
-        def shuffle(self,ro=None):
+        def shuffle_old(self,ro=None):
             "shuffle CircularIndex indicies and new indices that points to the jagged arrays that ro pointed to indirectly"
             if ro is None: np.random.shuffle(self.idx)
             else:          
-                log     = False
-                t0      = time.perf_counter() if log else None
-                idx_cpy = self.idx.copy() if log else None
-
                 #get the location(ro_idx) of the data indices for ro and the data indices themself (rod)
                 ro_ix  = ro%len(self.idx) if self.forward else len(self.idx)-1-ro%len(self.idx)
                 rod    = self.idx[ro_ix]
@@ -27,33 +23,52 @@ class MyLanguageModelPreLoader(Callback):
                 idx_rp = np.delete(self.idx,ro_ix)
                 if len(rod)+len(idx_rp) == len(self.idx):                     
                     #we can proceed with NO ties(ie no ro_idx points to the same value in idx)
-
-                    #shuffle the remaining indicies in idx
                     np.random.shuffle(idx_rp) 
 
                     #insert rod with equal intervals in the shuffled idx
                     step     = len(idx_rp) / len(rod)
                     offsets  = np.round(np.arange(len(rod))*step).astype(np.int)
+
                     self.idx = np.insert(idx_rp, offsets, rod)
                     ro_new   = offsets+np.arange(len(offsets))
-
-                    if log:
-                        ro_after = self.idx[ ro_new%len(self.idx) if self.forward else len(self.idx)-1-ro_new%len(self.idx)]
-                        if not ((ro_after-rod)==0).all():
-                            print(f"\nstep  :{step}\nidx_rp:{idx_rp}\noffs  :{offsets}")
-                            print(f"\n\nidx      :{self.idx}")
-                            print( f"\ndiff     :{(ro_after-rod)}\nro_after :{ro_after}\nro_before:{rod}" )
-
-                        #print(f"idx      :{self.idx}")
-                        #print(f"idx_cpy  :{idx_cpy}")
-                        #pct_changed = (len(self.idx) - np.sum((self.idx-idx_cpy)==0))/len(self.idx)
-                        #print(f"Time to shuffle: {time.perf_counter()-t0} sec. Shuffled {len(idx_rp)}/{len(self.idx)} tokens => changed:{int(pct_changed*100.+.5)} %. ")        
-                    #print(f"Time to shuffle: {(time.perf_counter()-t0):.1e}")        
+                    if not self.forward:ro_new = len(self.idx)-1-ro_new%len(self.idx)
                 else:
-                    #print("no shuffle")
                     #we do not shuffle when there is ties because ths only occure in tiny datasets such as testdata
                     ro_new = ro
-                return ro_new
+            return ro_new
+
+        def shuffle(self,ro=None):
+            "shuffle CircularIndex indicies and new indices that points to the jagged arrays that ro pointed to"
+            if ro is None: np.random.shuffle(self.idx)
+            elif len(np.unique(ro)) < len(ro) : return ro  #don't shuffle if we got ties (happens in tiny datasets)
+            else: 
+                #get indicies and values for ro
+                ro_ix   = ro%len(self.idx) if self.forward else len(self.idx)-1-ro%len(self.idx)
+                ro      = self.idx[ro_ix].flatten()
+
+                #calc offset to insert ro in idx at equally spaced intervals
+                step    = len(self.idx)/len(ro)
+                offsets = np.round(np.arange(len(ro))*step).astype(np.int)
+
+                #tag the positions for ro before shuffle and then find them again after shuffle
+                self.idx[ro_ix] = -1
+                np.random.shuffle(self.idx)
+                ro_ix = self.idx == -1  #boolean with true in position with value -1
+            
+                #move the values from ro's comming positions 
+                if np.sum(ro_ix[offsets]) == 0: 
+                    #no common values in the left- and right- hand side indicies
+                    self.idx[ro_ix] = self.idx[offsets]
+                else:
+                    #this operation is expensive but rare
+                    ro_ix = np.flatnonzero( ro_ix ) #convert to indicies
+                    intersect, ro_ind, offsets_ind = np.intersect1d(ro_ix, offsets, assume_unique=True, return_indices=True) 
+                    self.idx[np.delete(ro_ix,ro_ind)] = self.idx[np.delete(offsets,offsets_ind)]
+
+                #set ro and return the new ro
+                self.idx[offsets] = ro
+                if not self.forward: offsets = len(self.idx)-1-offsets%len(self.idx)
+                return offsets
 
     def __init__(self, dataset:LabelList, lengths:Collection[int]=None, bs:int=32, bptt:int=70, backwards:bool=False, 
                  shuffle:bool=False):
@@ -99,7 +114,12 @@ class MyLanguageModelPreLoader(Callback):
         #after the first epoch get the direct location of ro in the source data 
         #ro_from = None if self.idx is None else  [self.idx[i] for i in self.ro]
         if self.idx is None: self.allocate_buffers()
-        elif self.shuffle: self.ro = self.idx.shuffle(self.ro)
+        elif self.shuffle:
+            ro_before = np.fromiter((self.idx[r] for r in self.ro), dtype=np.int, count=len(self.ro))
+            self.ro = self.idx.shuffle(self.ro)
+            ro_after  = np.fromiter((self.idx[r] for r in self.ro), dtype=np.int, count=len(self.ro))
+            assert ((ro_after-ro_before)==0).all(), f"\nfailed   :{(ro_after-ro_before)}\nro_after :{ro_after}\nro_before:{ro_before}"
+
         self.idx.forward = not self.backwards 
          
     #Training dl gets on_epoch_begin called, val_dl, on_epoch_end
