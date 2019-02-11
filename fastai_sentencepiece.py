@@ -17,7 +17,7 @@ def rm_empty_lists(t:str) -> str:
     t= re.sub("[\s,;]\)",")", t) # replace ,) or ,)  with )
     #t= re.sub("\([\s,;]+","(", t) # replace (, or ( , with (
     #t= re.sub("[\s,;]+\)",")", t) # replace ,) or ,)  with )
-    t= re.sub("\([^\d\w\r\n]+\)", "", t)     # remove  () ( ) (  )  (, ) (, )  (,,, ; ) but leave any parantese with a letter or number
+    t= re.sub("\([^\d\w\r\n]*\)", "", t)     # remove  () ( ) (  )  (, ) (, )  (,,, ; ) but leave any parantese with a letter or number
     return t
 
 def lower(t:str) -> str: return t.lower()
@@ -57,11 +57,14 @@ def my_replace_rep(t:str) -> str:
 
 
 def count_alphas(t:str) -> str: 
-    len_spaces       = t.count(" ")
-    len_alphas       = len(re.findall('[A-Za-z\"“”‘’]', t)) 
-    len_list_symbols = len(re.findall('[,;:•—|\\/]', t))
+    len_spaces   = t.count(" ")
+    len_alphas   = len(re.findall('[A-Za-z\"“”‘’]', t)) 
+    sep_symbols  = len(re.findall('[,;:•—|\\/]', t))
+    hyphen_symbols  = len(re.findall('[—]', t))
+    len_parentheses_symbols = len(re.findall('[\(\)]', t))
     if len_spaces==0 : len_spaces=1e-6
-    return len_alphas/len(t), len_alphas/len_spaces, len_list_symbols/len_spaces  #alpha ratio, alphas/word, tech symbols/word
+    if len_alphas==0 : len_alphas=1e-6
+    return len_alphas/len(t), hyphen_symbols/len_alphas, sep_symbols/len_spaces, len_parentheses_symbols/len_alphas
     
 #not used at present: replace_rep, replace_wrep
 spm_rules = [fix_html, lower, extract_link_title, rm_stray_tags, rm_empty_lists, rm_empty_quotes,
@@ -76,8 +79,10 @@ class SentencepieceWikiVocab:
         self.vocab_size     = vocab_size
         self.model_type     = model_type
 
-    def wikijson2TrainingData(self, rules=spm_rules, min_alpha=0.66, max_sep_pr_space=0.16, 
-                                    max_characters_pr_line=8000, min_words_pr_line=6, chunksize=int(4e7)):
+    def wikijson2TrainingData(self, rules=spm_rules, 
+                              min_alpha_pr_char=0.66, max_sep_pr_space=0.16, max_parentheses_pr_alpha = 0.07, max_hyphens_pr_alpha=0,02,
+                              min_words_pr_line=6, max_lines_pr_section=61,
+                              chunksize=int(4e7)):
         #Generate text files for training af sentencepiece vocabulary and a csv-file for training a languagemodel with the vocabulary"
         
         def save_sections( data, f_out, fileCount, header=False):
@@ -93,12 +98,17 @@ class SentencepieceWikiVocab:
         i_csv_write=0
         with self.pathcsv.open("w", encoding='utf-8') as f_out:
             fileCount = 0
-            fields    = ["text", "wordcount", "lettercount", "linecount", "words_pr_line", "letters_pr_line", "letters_pr_word", "alpha_r1", "alpha_r2", "alpha_r3"]
+            fields    = ["text", "wordcount", "lettercount", "linecount", 
+                         "words_pr_line", "letters_pr_line", "letters_pr_word", 
+                         "alpha_pr_char", "parentheses_pr_alpha", "sep_pr_space", "hyphens_pr_alpha"]
             data      = pd.DataFrame(columns=fields)
             #data.to_csv(f_out, index=False, mode='a', encoding='utf-8' )
             
             sections = []
             nbWords  = 0
+            #files = list(self.pathJson.glob("**/wiki*"))
+            #files = files[:len(files)//3]
+            #for fn in files:
             for fn in self.pathJson.glob("**/wiki*"):
                 with open(fn, encoding='utf-8') as f:
                     for line in f:
@@ -109,17 +119,19 @@ class SentencepieceWikiVocab:
                         #first rough cleanup
                         text = section['text']
                         text = reduce(lambda t, rule: rule(t), rules, text)
+
                         txt_selected = []
                         for tl in text.splitlines() :
                             tln         = len(tl)
                             if tln==0: continue
                             wpl          = len(re.findall(r' ',tl))
-                            alpha_pr_sentence, alpha_pr_word, sep_pr_space = count_alphas(tl)
-                            if tln < max_characters_pr_line and wpl >= min_words_pr_line and \
-                               alpha_pr_sentence >= min_alpha and sep_pr_space <= max_sep_pr_space:
+                            alpha_pr_char, hyphens_pr_alpha, sep_pr_space, parentheses_pr_alpha = count_alphas(tl)
+                            if wpl >= min_words_pr_line and \
+                               alpha_pr_char >= min_alpha_pr_char and sep_pr_space <= max_sep_pr_space and 
+                               parentheses_pr_alpha < max_parentheses_pr_alpha and hyphens_pr_alpha < max_hyphens_pr_alpha:
                                 txt_selected.append(tl)
 
-                        text = "\n".join(txt_selected) if len(txt_selected)>0 else ""
+                        text = "\n".join(txt_selected) if len(txt_selected)>0 and len(txt_selected) < max_lines_pr_section  else ""
                         
                         section['text'] = text
                         if len(txt_selected) > 0 and len(text)>0:
@@ -130,9 +142,10 @@ class SentencepieceWikiVocab:
                             section['letters_pr_line'] = section['lettercount'] / (section['linecount']) #+1 because we applied trim
                             section['letters_pr_word'] = section['lettercount'] / (section['wordcount']+1) #+1 to avoid div by zero
                             alphas = count_alphas(text)
-                            section['alpha_r1'] = alphas[0]
-                            section['alpha_r2'] = alphas[1]
-                            section['alpha_r3'] = alphas[2]
+                            section['alpha_pr_char']        = alphas[0]*100
+                            section['hyphens_pr_alpha']     = alphas[1]*100
+                            section['sep_pr_space']         = alphas[2]*100
+                            section['parentheses_pr_alpha'] = alphas[3]*100
 
                         if len(text) > 0:
                             sections.append({k:section[k] for k in fields})
