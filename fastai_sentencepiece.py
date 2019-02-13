@@ -80,7 +80,7 @@ class SentencepieceWikiVocab:
         self.model_type     = model_type
 
     def wikijson2TrainingData(self, rules=spm_rules, 
-                              min_alpha_pr_char=0.66, max_sep_pr_space=0.16, max_parentheses_pr_alpha = 0.07, max_hyphens_pr_alpha=0,02,
+                              min_alpha_pr_char=0.66, max_sep_pr_space=0.16, max_parentheses_pr_alpha = 0.07, max_hyphens_pr_alpha=0.02,
                               min_words_pr_line=6, max_lines_pr_section=61,
                               chunksize=int(4e7)):
         #Generate text files for training af sentencepiece vocabulary and a csv-file for training a languagemodel with the vocabulary"
@@ -127,7 +127,7 @@ class SentencepieceWikiVocab:
                             wpl          = len(re.findall(r' ',tl))
                             alpha_pr_char, hyphens_pr_alpha, sep_pr_space, parentheses_pr_alpha = count_alphas(tl)
                             if wpl >= min_words_pr_line and \
-                               alpha_pr_char >= min_alpha_pr_char and sep_pr_space <= max_sep_pr_space and 
+                               alpha_pr_char >= min_alpha_pr_char and sep_pr_space <= max_sep_pr_space and \
                                parentheses_pr_alpha < max_parentheses_pr_alpha and hyphens_pr_alpha < max_hyphens_pr_alpha:
                                 txt_selected.append(tl)
 
