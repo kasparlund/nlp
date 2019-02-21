@@ -1,40 +1,8 @@
 from fastai.text import * 
 
-class Sampler():
-    def __init__(self,populationSize:int):self.n_population = populationSize
-    def sampleOne(self)->int: pass
-    def changeSampler( self, sampler): self.sampler = sampler
-    def __len__(self) -> int: return self.n_population
-    
-    class Iter():
-        def __init__(self,sampler:Sampler,hasStop:bool, ix_first):
-            self.sampler, self.i, self.hasStop = sampler, ix_first-1, hasStop
-        def __next__(self):
-            "Return next sample."
-            #if self.i >= len(self.sampler) and self.hasStop: raise StopIteration
-            #else: return self.sampler.sampleOne(self.i)
-            #"""
-            #i = self.i
-            while True:
-                yield self.sampler.sampleOne()
-                #i += 1
-                #yield self.sampler.sampleOne(i)
-            #"""    
-            #self.i += 1
-            #return self.sampler.sampleOne()
-            #return self.sampler.sampleOne(self.i)
-            
-    def __iter__(self,hasStop=True,ix_first:int=0): return Sampler.Iter(self,hasStop,ix_first)
-    def sample(self, n:int ): 
-        return np.fromiter( (self.sampleOne() for i in range(n)), dtype=np.int64, count=n)
-        #i = iter(self)
-        #return np.fromiter( (next(i)), dtype=np.int64, count=n)
-        #return np.fromiter( (s for s in self), dtype=np.int64, count=n)
-                
 def random_bucket(nBuckets):
-    nRepeat,ix_last = int(2.5e4)//nBuckets,0
+    nRepeat,ix_last = int(1e4)//nBuckets,0
     numbers = np.repeat(np.arange(nBuckets,dtype=np.int),nRepeat)
-    #print(f"nRepeat:{nRepeat}\nlen(numbers):{len(numbers)}\nnumbers:{numbers}")
     def rand_int():
         nonlocal numbers,ix_last
         if ix_last == 0:
@@ -44,149 +12,91 @@ def random_bucket(nBuckets):
         return numbers[ix_last]
     return rand_int
 
+class ShuffleSampler(Sampler):
+    "samples index from range 0-length infinitely by shuffle the index when they have all been used"
+    def __init__(self, length:int, shuffle:bool=True): 
+        self.idx, self.ix_last, self.shuffle = np.arange(length), length, shuffle
+        super().__init__(self.idx)
+    def __len__(self) -> int: return len(self.idx)
+    def __iter__(self): return self    
+    def __next__(self):        
+        ix = self.ix_last = self.ix_last - 1
+        if ix == -1: 
+            ix = self.ix_last = len(self.idx) - 1
+            if self.shuffle:np.random.shuffle(self.idx)
+        return self.idx[ix]
+    def sample(self, n:int ): return np.fromiter( (s for s in self), dtype=np.int64, count=n)
+
+class SampleOnLength(Sampler):
+        
+    def __init__(self, lengths, bins, sampler:Sampler, min_bucket_size=1000):
+        super().__init__(lengths)        
+        self.lengths, self.bins, self.sampler = lengths, bins, sampler
+        self.from_fixed_step(lengths,bins,min_bucket_size)
+        
+    def from_fixed_step(self, lengths, bins,min_bucket_size):
+        #Group sentences by length in buckets with a fixed width(step). Then merge neighboring buckets 
+        #so all contain at least min_bucket_size sentences  
+        n_buckets, lower,upper,step = len(bins), bins[0],bins[-1],(bins[-1]-bins[0])/(len(bins)-1)
+        
+        buckets = np.empty(n_buckets,dtype=object)
+        for i in range(n_buckets): buckets[i]=[]
+        
+        for i in range(len(lengths)): 
+            length = lengths[i]-lower
+            ib     = 0 if length<0 else (n_bucket-1 if length>upper else int(length/step) )
+            buckets[ib].append(i)
+            
+        #merge buckets below min_bucket_size
+        i=0
+        while i < len(buckets):
+            if len(buckets[i]) < min_bucket_size and len(buckets[i])>0:
+                b = buckets[i]
+                i += 1
+                while len(b) < min_bucket_size and i < len(buckets):
+                    if len(buckets[i]) > 0:
+                        extend_by = min( len(buckets[i]), min_bucket_size-len(b) )
+                        b.extend(buckets[i][:extend_by])
+                        buckets[i] = buckets[i][extend_by:]
+                    if len(buckets[i])==0 : i += 1
+            else:       
+                i += 1
+        
+        ix_empty = 0==np.fromiter( (len(b) for b in buckets), dtype=np.int, count=n_buckets)
+        buckets  = buckets[ix_empty==False] 
+        if len(buckets[-1]) < min_bucket_size:
+            buckets[-2].extend(buckets[-1])
+            buckets = buckets[:-1]
+        
+        #convert to arrays
+        for i in range(len(buckets)): buckets[i] = np.asarray(buckets[i],np.int64)
+        self.buckets = buckets
+        self.ix_last = np.fromiter( (len(b) for b in buckets), dtype=np.int64, count=len(buckets) )
+        
+    def __len__(self) -> int: return len(self.lengths)
+    def __iter__(self): return self    
+    def __next__(self):        
+        i_bucket = self.sampler()
+        ix = self.ix_last[i_bucket] = self.ix_last[i_bucket] - 1        
+        if ix == -1:
+            ix = self.ix_last[i_bucket] = len(self.buckets[i_bucket])-1
+            np.random.shuffle(self.buckets[i_bucket])
+        return self.buckets[i_bucket][ix]
+    def sample(self, n:int ): return np.fromiter( (s for s in self), dtype=np.int64, count=n)
+
 class BatchLayout(IntEnum):
     Parallel   = 1
     Sequential = 2
 
 class MyLanguageModelPreLoader(Callback):
     "Transforms the tokens in `dataset` to a stream of contiguous batches for language modelling."
-    """        
-    class CircularIndex():
-        "Handles shuffle, direction of indexing, wraps around to head tail in the ragged array as needed"
-        def __init__(self, length:int, forward:bool): self.idx, self.forward = np.arange(length),forward
-        def __getitem__(self, i): return self.idx[ i%len(self.idx) if self.forward else len(self.idx)-1-i%len(self.idx)]
-        def __len__(self) -> int: return len(self.idx)
-        def shuffle(self): np.random.shuffle(self.idx)
-        def shuffle_old(self,ro=None):
-            "shuffle CircularIndex indicies and new indices that points to the jagged arrays that ro pointed to indirectly"
-            if ro is None: np.random.shuffle(self.idx)
-            else:          
-                #get the location(ro_idx) of the data indices for ro and the data indices themself (rod)
-                ro_ix  = ro%len(self.idx) if self.forward else len(self.idx)-1-ro%len(self.idx)
-                rod    = self.idx[ro_ix]
-            
-                #remove rod from idx before shuffle
-                idx_rp = np.delete(self.idx,ro_ix)
-                if len(rod)+len(idx_rp) == len(self.idx):                     
-                    #we can proceed with NO ties(ie no ro_idx points to the same value in idx)
-                    np.random.shuffle(idx_rp) 
-
-                    #insert rod with equal intervals in the shuffled idx
-                    step     = len(idx_rp) / len(rod)
-                    offsets  = np.round(np.arange(len(rod))*step).astype(np.int)
-
-                    self.idx = np.insert(idx_rp, offsets, rod)
-                    ro_new   = offsets+np.arange(len(offsets))
-                    if not self.forward:ro_new = len(self.idx)-1-ro_new%len(self.idx)
-                else:
-                    #we do not shuffle when there is ties because ths only occure in tiny datasets such as testdata
-                    ro_new = ro
-            return ro_new
-
-        def shuffle(self,ro=None):
-            "shuffle CircularIndex indicies and new indices that points to the jagged arrays that ro pointed to"
-            if ro is None: np.random.shuffle(self.idx)
-            elif len(np.unique(ro)) < len(ro) : return ro  #don't shuffle if we got ties (happens in tiny datasets)
-            else: 
-                #get indicies and values for ro
-                ro_ix   = ro%len(self.idx) if self.forward else len(self.idx)-1-ro%len(self.idx)
-                ro      = self.idx[ro_ix].flatten()
-
-                #calc offset to insert ro in idx at equally spaced intervals
-                step    = len(self.idx)/len(ro)
-                offsets = np.round(np.arange(len(ro))*step).astype(np.int)
-
-                #tag the positions for ro before shuffle and then find them again after shuffle
-                self.idx[ro_ix] = -1
-                np.random.shuffle(self.idx)
-                ro_ix = self.idx == -1  #boolean with true in position with value -1
-            
-                #move the values from ro's comming positions 
-                if np.sum(ro_ix[offsets]) == 0: 
-                    #no common values in the left- and right- hand side indicies
-                    self.idx[ro_ix] = self.idx[offsets]
-                else:
-                    #this operation is expensive but rare
-                    ro_ix = np.flatnonzero( ro_ix ) #convert to indicies
-                    intersect, ro_ind, offsets_ind = np.intersect1d(ro_ix, offsets, assume_unique=True, return_indices=True) 
-                    self.idx[np.delete(ro_ix,ro_ind)] = self.idx[np.delete(offsets,offsets_ind)]
-
-                #set ro and return the new ro
-                self.idx[offsets] = ro
-                if not self.forward: offsets = len(self.idx)-1-offsets%len(self.idx)
-                return offsets
-
-        def __iter__(self): return next(self)
-        def __next__(self):
-            i=-1
-            while True: 
-                i+=1
-                if i >= len(self): return
-                else:              yield i
-    """        
-    class ShuffleSampler(Sampler):
-        "Handles shuffle, direction of indexing, wraps around to head tail in the ragged array as needed"
-        def __init__(self, length:int, shuffle:bool=True): 
-            super().__init__(length)
-            self.idx, self.ix_last, self.shuffle = np.arange(length), length, shuffle
-        def sampleOne(self)->int:
-            ix = self.ix_last = self.ix_last - 1
-            if ix == -1: 
-                ix = self.ix_last = len(self.idx) - 1
-                if self.shuffle:np.random.shuffle(self.idx)
-            return self.idx[len(self.idx)-ix-1]
-
-    class SampleOnLength(Sampler):
-        def __init__(self, lengths, bins, sampler:Sampler):
-            super().__init__(len(lengths))        
-            self.bins, self.shuffle_in_buckets, self.sampler = bins, True, sampler
-
-            n_buckets = len(bins)   
-            buckets   = np.empty(n_buckets,dtype=object)
-            for i in range(n_buckets): buckets[i]=[]
-        
-            lower,upper,step = bins[0],bins[-1],(bins[-1]-bins[0])/(n_buckets-1)
-            #print(f"bins:{bins}\nn_buckets:{n_buckets}\nlower:{lower}, upper:{upper}, step:{step}")
-            for i in range(len(lengths)): 
-                length = lengths[i]-lower
-                ib     = 0 if length<0 else n_bucket-1 if length>upper else int((length-lower)/step + .5) 
-                buckets[ib].append(i)
-        
-            #fill empty buckets
-            bucket_size = np.fromiter( ( len(b) for b in buckets ), dtype=np.int, count=n_buckets)
-            ix_empty    = np.flatnonzero( bucket_size==0 )
-            for i in ix_empty:
-                #fill the empty bucket from the nearest left or right bucket
-                i_n, stolen = 0, []
-                while len(stolen) == 0:
-                    i_n  += 1
-                    ib    = i-i_n if i-i_n >= 0            and len(buckets[i-i_n]) > 1 else \
-                            i+i_n if i+i_n  < len(buckets) and len(buckets[i+i_n]) > 1 else None
-                    if ib is not None:
-                        split = len(buckets[ib])//2
-                        stolen.extend(buckets[ib][split : ])
-                        buckets[ib] = buckets[ib][ : split]
-                    buckets[i] = stolen
-            
-            #convert to arrays
-            for i in range(n_buckets): buckets[i] = np.asarray(buckets[i],np.int64)
-            self.buckets = buckets
-            self.ix_last = np.fromiter( (len(b) for b in buckets), dtype=np.int64, count=len(buckets) )
-
-        def sampleOne(self)->int:
-            i_bucket = self.sampler()
-            ix = self.ix_last[i_bucket] = self.ix_last[i_bucket] - 1        
-            if ix == -1:
-                ix = self.ix_last[i_bucket] = len(self.buckets[i_bucket])-1
-                if self.shuffle_in_buckets: np.random.shuffle(self.buckets[i_bucket])
-            return self.buckets[i_bucket][ix]
-
-
+    
     def __init__(self, dataset:LabelList, lengths:Collection[int]=None, bs:int=32, bptt:int=70, backwards:bool=False, 
                  shuffle:bool=False):
         self.dataset,self.bs,self.bptt,self.shuffle,self.backwards,self.lengths = dataset,bs,bptt,shuffle,backwards,lengths
         self.totalToks,self.ite_len,self.idx = int(0),None,None
         print("MyLanguageModelPreLoader")
+
     def __len__(self): 
         if self.ite_len is None:
             if self.lengths is None: self.lengths = np.fromiter( (len(item) for item in self.dataset.x.items),dtype=np.int,count=len(self.dataset.x.items) )
@@ -201,39 +111,30 @@ class MyLanguageModelPreLoader(Callback):
         if self.ite_len is None: len(self)
 
         self.resampleLengths = True
-        if self.resampleLengths:
+        if self.resampleLengths and self.shuffle:
             lower, upper, step = np.min(self.lengths), np.max(self.lengths), 10
             if (upper-lower)//step < 10: step = 1
             bins         = np.arange( lower, upper+step, step)
             #print(f"lower:{lower}, upper:{upper}, step:{step}\nbins:{bins}")
-            bins_sampler = random_bucket(nBuckets=len(bins))
-            self.idx     = MyLanguageModelPreLoader.SampleOnLength(self.lengths, bins, sampler=bins_sampler)
+            uniform_sampler = random_bucket(nBuckets=len(bins))
+            self.idx        = SampleOnLength(self.lengths, bins, uniform_sampler,min_bucket_size=2)
+            self.idx.sampler = random_bucket(nBuckets=len(self.idx.buckets))
             #print(f"self.idx.buckets:{self.idx.buckets}")
         else:
-            self.idx   = LanguageModelPreLoader.ShuffleSampler(len(self.dataset.x.items), self.shuffle)
-
+            self.idx   = ShuffleSampler(len(self.dataset.x.items), self.shuffle)
+        print(f"allocate_buffers sampler classs:{self.idx.__class__}")
         self.batch = np.zeros((self.bs, self.bptt+1), dtype=np.int64)
         self.batch_x, self.batch_y = self.batch[:,0:self.bptt], self.batch[:,1:self.bptt+1] 
         #ro: index of the text we're at inside our datasets for the various batches
-        self.ro    = np.fromiter( (self.idx.sampleOne() for i in range(self.bs)), dtype=np.int64, count=self.bs)
+        self.ro    = np.fromiter( (next(self.idx) for i in range(self.bs)), dtype=np.int64, count=self.bs)
         #self.ro    = np.zeros(self.bs, dtype=np.int64)
         #ri: index of the token we're at inside our current text for the various batches
         #self.ri    = np.zeros(self.bs, dtype=np.int)
         self.ri    = np.fromiter( (self.lengths[self.ro[i]] if self.backwards else 0  for i in range(self.bs)), 
                                   dtype=np.int64, count=self.bs)
 
-        #t0 = time.perf_counter()
         """
-        step = self.totalToks / self.bs
-        ln_rag, countTokens, i_rag = 0, 0, -1
-        for i in range(0,self.bs):
-            #Compute the initial values for ro and ri 
-            while ln_rag + countTokens <= int(step * i):
-                countTokens += ln_rag
-                i_rag       += 1
-                ln_rag       = self.lengths[self.idx[i_rag]]
-            self.ro[i] = i_rag
-            self.ri[i] = ( ln_rag - int(step * i - countTokens) ) if self.backwards else int(step * i - countTokens)
+        #t0 = time.perf_counter()
         #print(f"time to initialize ro,ri:{(time.perf_counter()-t0):.1e}")
         """
 
@@ -243,15 +144,7 @@ class MyLanguageModelPreLoader(Callback):
         #after the first epoch get the direct location of ro in the source data 
         #ro_from = None if self.idx is None else  [self.idx[i] for i in self.ro]
         if self.idx is None: self.allocate_buffers()
-        """            
-        elif self.shuffle:
-            ro_before = np.fromiter((self.idx[r] for r in self.ro), dtype=np.int, count=len(self.ro))
-            self.ro = self.idx.shuffle(self.ro)
-            ro_after  = np.fromiter((self.idx[r] for r in self.ro), dtype=np.int, count=len(self.ro))
-            assert ((ro_after-ro_before)==0).all(), f"\nfailed   :{(ro_after-ro_before)}\nro_after :{ro_after}\nro_before:{ro_before}"
-        self.idx.forward = not self.backwards 
-        """            
-
+        print(f"on_epoch_begin sampler classs:{self.idx.__class__}")
          
     #Training dl gets on_epoch_begin called, val_dl, on_epoch_end
     def on_epoch_end(self, **kwargs): self.on_epoch_begin()
@@ -271,7 +164,7 @@ class MyLanguageModelPreLoader(Callback):
         ibuf = n = 0 
         #ro  -= 1
         while ibuf < row.size:  
-            ro    = sampler.sampleOne() if ibuf else ro
+            ro    = next(sampler) if ibuf else ro
             rag   = items[ro]
             if forward:
                 ri = 0 if ibuf else ri
