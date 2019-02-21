@@ -29,7 +29,7 @@ class ShuffleSampler(Sampler):
 
 class SampleOnLength(Sampler):
         
-    def __init__(self, lengths, bins, sampler:Sampler, min_bucket_size=1000):
+    def __init__(self, lengths, bins, sampler:Sampler=None, min_bucket_size=1000):
         super().__init__(lengths)        
         self.lengths, self.bins, self.sampler = lengths, bins, sampler
         self.from_fixed_step(lengths,bins,min_bucket_size)
@@ -37,8 +37,8 @@ class SampleOnLength(Sampler):
     def from_fixed_step(self, lengths, bins,min_bucket_size):
         #Group sentences by length in buckets with a fixed width(step). Then merge neighboring buckets 
         #so all contain at least min_bucket_size sentences  
-        n_buckets, lower,upper,step = len(bins), bins[0],bins[-1],(bins[-1]-bins[0])/(len(bins)-1)
-        
+        n_buckets, lower,upper,step = len(bins), bins[0],bins[-1], int( (bins[-1]-bins[0])/(len(bins)-1) +.5)
+        print(f"n_buckets:{n_buckets}, lower:{lower},upper:{upper},step:{step}")
         buckets = np.empty(n_buckets,dtype=object)
         for i in range(n_buckets): buckets[i]=[]
         
@@ -56,6 +56,7 @@ class SampleOnLength(Sampler):
                 while len(b) < min_bucket_size and i < len(buckets):
                     if len(buckets[i]) > 0:
                         extend_by = min( len(buckets[i]), min_bucket_size-len(b) )
+                        buckets[i].sort()
                         b.extend(buckets[i][:extend_by])
                         buckets[i] = buckets[i][extend_by:]
                     if len(buckets[i])==0 : i += 1
@@ -64,7 +65,7 @@ class SampleOnLength(Sampler):
         
         ix_empty = 0==np.fromiter( (len(b) for b in buckets), dtype=np.int, count=n_buckets)
         buckets  = buckets[ix_empty==False] 
-        if len(buckets[-1]) < min_bucket_size:
+        if len(buckets)>1 and len(buckets[-1]) < min_bucket_size:
             buckets[-2].extend(buckets[-1])
             buckets = buckets[:-1]
         
