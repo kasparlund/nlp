@@ -4,6 +4,7 @@ from functools import partial
 import re
 import string
 import shutil
+import hashlib
  
 import sentencepiece as spm
 
@@ -65,7 +66,7 @@ def count_alphas(t:str) -> str:
     if len_spaces==0 : len_spaces=1e-6
     if len_alphas==0 : len_alphas=1e-6
     return len_alphas/len(t), hyphen_symbols/len_alphas, sep_symbols/len_spaces, len_parentheses_symbols/len_alphas
-    
+def only_alphas(t:str) -> str: return re.findall('[A-Za-z]', t)
 #not used at present: replace_rep, replace_wrep
 spm_rules = [fix_html, lower, extract_link_title, rm_stray_tags, rm_empty_lists, rm_empty_quotes,
              my_replace_rep, my_replace_wrep, spec_add_more_spaces, rm_useless_spaces, trim ]
@@ -93,7 +94,7 @@ class SentencepieceWikiVocab:
             data.to_csv(f_out, index=False, header=header, mode='a', encoding='utf-8')
         
         pathParts = len(self.pathJson.parts)        
-
+        unique_lines = {}
         if not self.pathcsv.parent.exists(): self.pathcsv.parent.mkdir(parents=True, exist_ok=True)
         i_csv_write=0
         with self.pathcsv.open("w", encoding='utf-8') as f_out:
@@ -129,7 +130,11 @@ class SentencepieceWikiVocab:
                             if wpl >= min_words_pr_line and \
                                alpha_pr_char >= min_alpha_pr_char and sep_pr_space <= max_sep_pr_space and \
                                parentheses_pr_alpha < max_parentheses_pr_alpha and hyphens_pr_alpha < max_hyphens_pr_alpha:
-                                txt_selected.append(tl)
+
+                               tl_hash = only_alphas(tl).encode()).hexdigest()
+                                if tl_hash not in unique_lines: 
+                                    txt_selected.append(tl)
+                                    unique_lines[tl_hash]=""
 
                         text = "\n".join(txt_selected) if len(txt_selected)>0 and len(txt_selected) < max_lines_pr_section  else ""
                         

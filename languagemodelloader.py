@@ -36,7 +36,7 @@ class SampleOnLength(Sampler):
         
     def from_fixed_step(self, lengths, bins,min_bucket_size):
         #Group sentences by length in buckets with a fixed width(step). Then merge neighboring buckets 
-        #so all contain at least min_bucket_size sentences  
+        #so all buckets contains at least min_bucket_size sentences  
         n_buckets, lower,upper,step = len(bins), bins[0],bins[-1], int( (bins[-1]-bins[0])/(len(bins)-1) +.5)
         print(f"n_buckets:{n_buckets}, lower:{lower},upper:{upper},step:{step}")
         buckets = np.empty(n_buckets,dtype=object)
@@ -47,7 +47,7 @@ class SampleOnLength(Sampler):
             ib     = 0 if length<0 else (n_bucket-1 if length>upper else int(length/step) )
             buckets[ib].append(i)
             
-        #merge buckets below min_bucket_size
+        #merge buckets of size less than min_bucket_size
         i=0
         while i < len(buckets):
             if len(buckets[i]) < min_bucket_size and len(buckets[i])>0:
@@ -84,11 +84,7 @@ class SampleOnLength(Sampler):
             np.random.shuffle(self.buckets[i_bucket])
         return self.buckets[i_bucket][ix]
     def sample(self, n:int ): return np.fromiter( (s for s in self), dtype=np.int64, count=n)
-
-class BatchLayout(IntEnum):
-    Parallel   = 1
-    Sequential = 2
-
+"""
 class MyLanguageModelPreLoader(Callback):
     "Transforms the tokens in `dataset` to a stream of contiguous batches for language modelling."
     
@@ -134,13 +130,6 @@ class MyLanguageModelPreLoader(Callback):
         self.ri    = np.fromiter( (self.lengths[self.ro[i]] if self.backwards else 0  for i in range(self.bs)), 
                                   dtype=np.int64, count=self.bs)
 
-        """
-        #t0 = time.perf_counter()
-        #print(f"time to initialize ro,ri:{(time.perf_counter()-t0):.1e}")
-        """
-
-    def printJagged(self):
-        for j in range(len(self.dataset.x.items)): print(f"r{j},{self.idx[j]} :{self.dataset.x.items[self.idx[j]]}")
     def on_epoch_begin(self, **kwargs):
         #after the first epoch get the direct location of ro in the source data 
         #ro_from = None if self.idx is None else  [self.idx[i] for i in self.ro]
@@ -210,3 +199,4 @@ class MyTextLMDataBunch(TextLMDataBunch):
         val_bs = bs
         dls = [DataLoader(d, b, shuffle=False) for d,b in zip(datasets, (bs,val_bs,val_bs,val_bs)) if d is not None]
         return cls(*dls, path=path, device=device, tfms=tfms, collate_fn=collate_fn, no_check=no_check)
+"""
